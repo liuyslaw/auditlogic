@@ -33,7 +33,38 @@ import AIInsight from './AIInsight.jsx'
 // the single-call path above remains primary because it's faster/cheaper
 // and most engagements have few enough documents per bank to never hit the
 // timeout at all.
-const RECONCILE_PHASE_SIZE = 3
+//
+// ADAPTIVE PHASE SIZING — added after a confirmed real 504 on Elkom's HLB
+// documents even with a fixed 3-docs/phase split and the unchangedFacilityIds
+// optimisation (see below) both in place. Root cause, confirmed by reading
+// the actual source PDFs: a fixed document COUNT per phase says nothing
+// about how much genuinely NEW content those documents contain. That
+// specific phase (D407, D408, D412) happened to bundle a 7-page PEMULIH
+// relief letter plus two "continuation of facilities" letters that each
+// re-list and actively revise the SAME ~9-10 facility lines (Fixed TL-SRF,
+// Fixed TL, Overdraft, a 6-instrument pooled Combined Trade bundle, FEC) —
+// three consecutive documents with almost nothing left for
+// unchangedFacilityIds to skip, because almost none of it was actually
+// unchanged. A fixed doc-count phase has no way to see that coming.
+//
+// Phases are now bounded by TWO limits, whichever is hit first:
+//   RECONCILE_PHASE_MAX_DOCS       — the old fixed cap, kept as an upper
+//                                    bound so a run of very light documents
+//                                    (few facilities each) still doesn't
+//                                    grow a phase unboundedly.
+//   RECONCILE_PHASE_MAX_FACILITIES — new: caps a phase by the actual number
+//                                    of RAW facilities its documents
+//                                    introduce, which is a much closer proxy
+//                                    for how much new output a phase will
+//                                    require than document count is. A
+//                                    single document that alone exceeds this
+//                                    (like D408 or D412 here, ~9-10 lines
+//                                    each) still gets its own phase — it
+//                                    can't be split further — but it will
+//                                    never be BUNDLED with other dense
+//                                    documents the way D407+D408+D412 were.
+const RECONCILE_PHASE_MAX_DOCS = 3
+const RECONCILE_PHASE_MAX_FACILITIES = 8
 
 function parseLoDateClient(s) {
   if (!s) return null
@@ -45,29 +76,51 @@ function parseLoDateClient(s) {
 }
 
 // Sorts documents chronologically by loDate (undated docs keep their
-// original relative order) then splits into phases of `phaseSize`, with one
-// guard: a document sharing the exact same loDate as the last document
-// already placed in the current phase is never pushed into a new phase on
-// its own — same-date letters (e.g. an Existing/New Limit pair issued
-// together) must be reconciled in the same phase or the sequencing logic
-// in reconcile.js has nothing to chain them against.
-function chunkDocsIntoPhases(docs, phaseSize) {
+// original relative order) then splits into phases, closing the current
+// phase and starting a new one as soon as EITHER limit below is hit — with
+// one guard that overrides both: a document sharing the exact same loDate
+// as the last document already placed in the current phase is never pushed
+// into a new phase on its own — same-date letters (e.g. an Existing/New
+// Limit pair issued together) must be reconciled in the same phase or the
+// sequencing logic in reconcile.js has nothing to chain them against.
+//
+//   1. current.length >= maxDocs               (old fixed cap)
+//   2. runningFacilityCount + thisDocsFacilities > maxFacilities
+//      (new: adaptive — see ADAPTIVE PHASE SIZING above)
+//
+// `bankFacilities` is the bank's full RAW (pre-reconcile) facility list —
+// used only to count how many facilities each document introduces, via its
+// sourceDocIds. A document that introduces zero facilities counts as 0 and
+// never triggers the facility-count limit on its own.
+function chunkDocsIntoPhases(docs, bankFacilities, maxDocs, maxFacilities) {
   const withIndex = docs.map((d, i) => ({ d, i, t: parseLoDateClient(d.loDate) }))
   const sorted = [...withIndex]
     .sort((a, b) => (a.t === null || b.t === null) ? a.i - b.i : a.t - b.t)
     .map(x => x.d)
 
+  const facilityCountByDoc = new Map()
+  sorted.forEach(doc => {
+    const count = bankFacilities.filter(f => (f.sourceDocIds || []).includes(doc.id)).length
+    facilityCountByDoc.set(doc.id, count)
+  })
+
   const phases = []
   let current = []
+  let currentFacilityCount = 0
   for (const doc of sorted) {
     const lastT = current.length > 0 ? parseLoDateClient(current[current.length - 1].loDate) : null
     const thisT = parseLoDateClient(doc.loDate)
     const sameDateAsLast = current.length > 0 && lastT !== null && thisT !== null && lastT === thisT
-    if (current.length >= phaseSize && !sameDateAsLast) {
+    const thisDocFacilities = facilityCountByDoc.get(doc.id) || 0
+    const hitsDocCap = current.length >= maxDocs
+    const hitsFacilityCap = current.length > 0 && (currentFacilityCount + thisDocFacilities) > maxFacilities
+    if ((hitsDocCap || hitsFacilityCap) && !sameDateAsLast) {
       phases.push(current)
       current = []
+      currentFacilityCount = 0
     }
     current.push(doc)
+    currentFacilityCount += thisDocFacilities
   }
   if (current.length > 0) phases.push(current)
   return phases
@@ -83,7 +136,7 @@ function chunkDocsIntoPhases(docs, phaseSize) {
 // and dedup logic in handleReconcile all depend on that being accurate and
 // need no changes themselves.
 async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgress) {
-  const phases = chunkDocsIntoPhases(bankDocs, RECONCILE_PHASE_SIZE)
+  const phases = chunkDocsIntoPhases(bankDocs, bankFacilities, RECONCILE_PHASE_MAX_DOCS, RECONCILE_PHASE_MAX_FACILITIES)
   let runningDocs = []
   let runningReconciled = []
   let lineage = new Map()

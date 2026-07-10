@@ -645,12 +645,12 @@ export default function A420Summary({ eng, updateFacilities, setActiveTab, recon
               reconciled together in one continuous chain. See
               EngagementShell.jsx's reconcileBankPhased for how this works. */}
           <label
-            title="Splits each bank's documents into small sequential steps (3 at a time) instead of one big call. Slower overall — pays the prompt overhead once per step instead of once total — but avoids server timeouts on engagements with many related documents from one bank. Turn on only if 'Reconcile Facilities' fails with a timeout/server error."
+            title="Splits each bank's documents into small sequential steps instead of one big call — up to 3 documents per step, but a step closes early if its documents already carry more than ~8 facilities between them, so a run of dense amendment letters doesn't get bundled into one oversized step. Slower overall — pays the prompt overhead once per step instead of once total — but avoids server timeouts on engagements with many related documents from one bank. Turn on only if 'Reconcile Facilities' fails with a timeout/server error."
             style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:'var(--text3)', cursor: reconciling?'default':'pointer', whiteSpace:'nowrap' }}>
             <input type="checkbox" checked={batchedReconcile} disabled={reconciling}
               onChange={e => setBatchedReconcile(e.target.checked)}
               style={{ accentColor:'var(--magenta)', cursor: reconciling?'default':'pointer' }} />
-            Batch reconcile (3 docs/bank)
+            Batch reconcile (adaptive phases)
           </label>
           <button
             // FIX: while a reconcile is already running, clicking this button
