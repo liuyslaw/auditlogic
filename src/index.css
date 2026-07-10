@@ -1,0 +1,70 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #111113;
+  --bg2:      #18181b;
+  --card:     #1c1c1f;
+  --card2:    #212125;
+  --border:   #2a2a2f;
+  --border2:  #333338;
+  --text:     #e4e4e7;
+  --text2:    #a1a1aa;
+  --text3:    #71717a;
+  --gold:     #f59e0b;
+  --gold2:    #fbbf24;
+  --magenta:  #B84480;
+  --green:    #22c55e;
+  --green2:   #16a34a;
+  --blue:     #3b82f6;
+  --red:      #ef4444;
+  --amber:    #f59e0b;
+  --white:    #ffffff;
+  --font:     'Inter', system-ui, sans-serif;
+  --mono:     'DM Mono', 'Fira Code', monospace;
+  --radius:   8px;
+  --radius-lg:12px;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button { cursor: pointer; font-family: var(--font); border: none; }
+input, select, textarea { font-family: var(--font); }
+a { text-decoration: none; color: inherit; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* Utility */
+.mono { font-family: var(--mono); }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Status badges */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 500; white-space: nowrap;
+}
+.badge-progress { background: rgba(245,158,11,0.15); color: var(--gold); }
+.badge-new      { background: rgba(59,130,246,0.15); color: var(--blue); }
+.badge-hold     { background: rgba(113,113,122,0.15); color: var(--text2); }
+.badge-done     { background: rgba(34,197,94,0.15);  color: var(--green); }
+.badge-live     { background: rgba(34,197,94,0.15);  color: var(--green); }
+
+/* Chip pill (A420, A310 etc) */
+.chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 7px; border-radius: 4px; font-size: 11px;
+  background: var(--card2); color: var(--text3); border: 1px solid var(--border);
+  font-family: var(--mono);
+}
+.chip-done { background: rgba(34,197,94,0.1); color: var(--green); border-color: rgba(34,197,94,0.25); }
+.chip-active { background: rgba(245,158,11,0.1); color: var(--gold); border-color: rgba(245,158,11,0.3); }
