@@ -166,6 +166,7 @@ export default async function handler(req, res) {
     purposes: f.purposes, facilityDate: f.facilityDate,
     isSettled: f.isSettled, loDocType: f.loDocType,
     conditionalIncrease: f.conditionalIncrease || { present: false, conditionText: '', unconditionalPortion: 0 },
+    alreadyReconciled: f.alreadyReconciled || false,
   }))
 
   const promptParts = [
@@ -576,6 +577,37 @@ RAW EXTRACTED FACILITIES (may contain duplicates across documents):
     `
 
 ═══════════════════════════════════════════════════════════════
+INCREMENTAL RECONCILE MODE — UNCHANGED FACILITIES
+═══════════════════════════════════════════════════════════════
+
+Some facilities above are marked "alreadyReconciled": true — these were
+already correctly consolidated in an earlier round (this engagement's
+documents are being processed in batches, oldest first). Do NOT rewrite
+these from scratch every round — that wastes generation time reproducing
+content that hasn't changed, and on large engagements can push the response
+long enough to risk a server timeout.
+
+  - If NOTHING in the current facility data actually affects a given
+    alreadyReconciled facility (no document changes its limit, rate,
+    security, adds a new red flag, or otherwise touches it), list its "id"
+    under "unchangedFacilityIds" in the output and do NOT repeat it in
+    reconciledFacilities at all.
+  - If something genuinely DOES change or add to it (a limit is restated, a
+    new red flag condition now applies, it needs to merge with a newly
+    introduced raw facility, etc.), include the FULL updated facility in
+    reconciledFacilities as normal, with its own id in mergedFromIds so it
+    is not also treated as unaccounted-for.
+  - Facilities NOT marked alreadyReconciled (i.e. newly introduced raw
+    facilities) have never been reconciled — they must always go through
+    reconciledFacilities, even if the correct outcome is simply to keep
+    them as extracted with no changes. Never put a raw, not-yet-reconciled
+    facility's id into unchangedFacilityIds.
+  - Only mark something unchanged after actually checking it against the
+    current round's information — this is a time-saving shortcut for
+    genuinely untouched facilities, not a way to skip real work.
+`,
+    `
+═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════
 
@@ -613,6 +645,7 @@ Return ONLY valid JSON. No markdown. No explanation.
       ]
     }
   ],
+  "unchangedFacilityIds": ["id-of-an-alreadyReconciled-facility-with-no-changes-this-round"],
   "intentionallyOmitted": [
     {
       "ids": ["id-of-original-raw-facility"],
@@ -622,14 +655,17 @@ Return ONLY valid JSON. No markdown. No explanation.
   "summary": "2-3 sentence QUALITATIVE summary. Do NOT state any numbers/counts (facility counts, document counts, bank counts, percentages) — the app computes and displays those separately from the actual data, and your count would likely not match. Instead name the specific facilities/banks involved in key merges, and describe the nature of the most significant red flags (e.g. which facility, what discrepancy) without tallying totals."
 }
 
-IMPORTANT — every input facility ID must end up EITHER inside some reconciledFacilities
-entry's mergedFromIds, OR inside intentionallyOmitted with a clear reason. Never just
-leave an input facility unreferenced with no explanation anywhere in the output — if you
-determine a facility should not appear in the working paper (settled, reduced to RM0 by
-a stated adjustment, absorbed into a named successor, etc.), you MUST list its original
-ID in intentionallyOmitted and say why. An ID that appears in neither place will be
-treated as an error and automatically restored with a "needs review" flag — so anything
-you deliberately excluded needs to be declared here to avoid being second-guessed.`
+IMPORTANT — every input facility ID must end up in ONE of: some reconciledFacilities
+entry's mergedFromIds, unchangedFacilityIds (only for facilities marked
+alreadyReconciled: true that genuinely need no changes — see INCREMENTAL RECONCILE
+MODE above), or intentionallyOmitted with a clear reason. Never just leave an input
+facility unreferenced with no explanation anywhere in the output — if you determine a
+facility should not appear in the working paper (settled, reduced to RM0 by a stated
+adjustment, absorbed into a named successor, etc.), you MUST list its original ID in
+intentionallyOmitted and say why. An ID that appears in none of these three places will
+be treated as an error and automatically restored with a "needs review" flag — so
+anything you deliberately excluded or left unchanged needs to be declared here to
+avoid being second-guessed.`
   ]
   const prompt = promptParts.join('')
 
