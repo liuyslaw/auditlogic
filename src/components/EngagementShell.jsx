@@ -94,6 +94,9 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
   // including the current one — used by the per-phase conservation check
   // below.
   const rawIdsSeenSoFar = new Set()
+  // Lookup for the ORIGINAL raw facility behind any original id — needed to
+  // recompute sourceDocIds below.
+  const origById = new Map(bankFacilities.map(f => [f.id, f]))
 
   for (let p = 0; p < phases.length; p++) {
     const phaseDocs = phases[p]
@@ -137,7 +140,21 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
       const origIds = expandIds(f.mergedFromIds)
       const newId = crypto.randomUUID()
       newLineage.set(newId, new Set(origIds))
-      return { ...f, id: newId, mergedFromIds: origIds }
+      // CRITICAL: reconcile.js's own grouping logic (DOCUMENT GROUPING /
+      // caRefNo+bank matching) works entirely off each facility's
+      // sourceDocIds — that's how it knows which document(s) a facility
+      // came from, and therefore whether a facility from a later phase's
+      // new document continues the same relationship. The API's OUTPUT
+      // schema for reconciledFacilities has no sourceDocIds field, so a
+      // facility carried forward from a prior phase would otherwise arrive
+      // at the NEXT phase's call with sourceDocIds silently missing —
+      // confirmed via a real test run to make the model treat it as an
+      // unanchored, unrelated record and generate a fresh duplicate entry
+      // from the new raw data instead of recognising it as a continuation.
+      // Recomputed here as the union of every original raw facility's own
+      // sourceDocIds across everything folded into this output so far.
+      const sourceDocIds = [...new Set(origIds.flatMap(id => (origById.get(id)?.sourceDocIds) || []))]
+      return { ...f, id: newId, mergedFromIds: origIds, sourceDocIds }
     })
     const phaseOmitted = (phaseResult.intentionallyOmitted || []).map(o => ({ ...o, ids: expandIds(o.ids) }))
     allOmitted.push(...phaseOmitted)
