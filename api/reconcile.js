@@ -36,6 +36,49 @@ function sanitizeJsonControlChars(text) {
   return out
 }
 
+// Repairs a different LLM JSON-generation defect: a response that ran out of
+// steam structurally rather than textually — confirmed via a real Vercel
+// runtime log (10 July 2026, 55,766-character response): the model finished
+// a normal, well-formed "summary" string, closed its final quote, and then
+// simply stopped (stop_reason: end_turn — it believed it was done) without
+// emitting the JSON object's closing brace(s). The existing brace-slice
+// repair above (raw.slice(start, raw.lastIndexOf('}') + 1)) assumes the LAST
+// "}" anywhere in the text is the true outer closing brace; when the object
+// is genuinely left unclosed at the end, that assumption finds some EARLIER
+// brace instead (e.g. the last completed facility object) and silently
+// truncates real trailing content (intentionallyOmitted/summary) rather than
+// fixing anything.
+//
+// This walks the text (respecting string literals/escapes, same approach as
+// sanitizeJsonControlChars) counting unmatched { and [ characters, then
+// appends exactly the closing characters needed, in the correct order, to
+// balance them. If the text was cut off mid-string, closes that string
+// first so the appended braces don't land inside it. No-ops if already
+// balanced.
+function balanceJsonBrackets(text) {
+  const stack = []
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) { escaped = false; continue }
+      if (ch === '\\') { escaped = true; continue }
+      if (ch === '"') { inString = false; continue }
+      continue
+    }
+    if (ch === '"') { inString = true; continue }
+    if (ch === '{' || ch === '[') { stack.push(ch); continue }
+    if (ch === '}' || ch === ']') { stack.pop(); continue }
+  }
+  if (stack.length === 0 && !inString) return text
+  let closer = ''
+  for (let i = stack.length - 1; i >= 0; i--) {
+    closer += stack[i] === '{' ? '}' : ']'
+  }
+  return (inString ? text + '"' : text) + closer
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
@@ -125,7 +168,8 @@ export default async function handler(req, res) {
     conditionalIncrease: f.conditionalIncrease || { present: false, conditionText: '', unconditionalPortion: 0 },
   }))
 
-  const prompt = `You are a senior Malaysian audit partner at SynerGrowth Consulting (SGC).
+  const promptParts = [
+    `You are a senior Malaysian audit partner at SynerGrowth Consulting (SGC).
 You have extracted facility data independently from multiple related bank documents.
 Your task now is to RECONCILE these extractions into one consolidated A420 working paper — one row per unique real-world facility.
 
@@ -171,7 +215,8 @@ same-date documents, check whether one document's "Existing (RM)" figure equals
 the OTHER document's "New Limit (RM)" figure. The document whose Existing figure
 matches the other's New Limit comes SECOND (it is amending the position the
 first letter just established). Chain multiple same-date letters this way if
-there are more than two.
+`,
+    `there are more than two.
 
   WORKED EXAMPLE: Letter A (dated 6.12.2024) shows Combined Trade Existing
   RM8,500,000 → New Limit RM13,500,000. Letter B (also dated 6.12.2024) shows
@@ -225,7 +270,8 @@ When the same facility appears across multiple documents and values differ:
   Repayment Terms:    Original LO → Supplement overrides if changed → Renewal overrides if restated
   Security:           Original LO → Supplement overrides if changed → Renewal CARRIES FORWARD (security rarely changes at renewal)
   Loan Covenants:     Original LO → Supplement overrides if changed → Renewal CARRIES FORWARD
-  Purposes:           Original LO → CARRIES FORWARD through all subsequent documents
+`,
+    `  Purposes:           Original LO → CARRIES FORWARD through all subsequent documents
   Facility Date:      ALWAYS the date of the ORIGINAL agreement that first established the
                       facility (Original LO date, or Supplementary LO date if the facility was
                       first introduced there). Renewal Letters, rate repricing, or restructuring
@@ -270,7 +316,8 @@ loan and trade facility alike, with zero exceptions.
 METHOD 1 — PREFERRED: read the bank's own computed "New Limit" column directly.
 
 Malaysian Supplementary LOs very commonly present changes as an explicit table with
-columns "Existing (RM)" | "Change +/- (RM)" | "New Limit (RM)" — the bank has ALREADY
+`,
+    `columns "Existing (RM)" | "Change +/- (RM)" | "New Limit (RM)" — the bank has ALREADY
 done the arithmetic for you. When this table format is present:
   - Extract the "New Limit" column value directly as the facility's limit. Do NOT
     recompute it yourself, and do NOT fall back to the "Existing" column.
@@ -311,7 +358,8 @@ decision.
     The SAME Supplementary LO's table also shows five trade instruments (LC1/TR1/BA1/
     IVF1/BG1, "Combined Trade 1"), each existing at RM1,200,000, each with Change
     -RM1,200,000, each New Limit "-". A separate bundle (Combined Trade 2, LC2/TR2/BA2/
-    IVF2/BG2) existing at RM1,200,000 shows Change +RM2,200,000, New Limit RM3,400,000.
+`,
+    `    IVF2/BG2) existing at RM1,200,000 shows Change +RM2,200,000, New Limit RM3,400,000.
     CORRECT: Combined Trade 1 omitted entirely (New Limit is nil, exactly like Example
     1's term loan above); Combined Trade 2 shown at RM3,400,000, original 15.10.2021
     date retained per the Facility Date rule (the Supplementary LO changes the limit,
@@ -355,7 +403,8 @@ approvedLimit itself only shows the combined total.
   WORKED EXAMPLE: A facility's New Limit is RM16,500,000, made up of an
   unconditional RM13,500,000 plus a conditional RM3,000,000 (per
   conditionalIncrease.conditionText: "upon six (6) months turnover reach/achieve
-  RM50,000,000-00 and completion of legal documentations"). CORRECT:
+`,
+    `  RM50,000,000-00 and completion of legal documentations"). CORRECT:
   approvedLimit = 16500000. redFlags includes: "RM3,000,000 of this facility's
   RM16,500,000 limit (Combined Trade, HLB, 6.12.2024) is conditional on the
   Borrower sustaining RM50,000,000 turnover over six months and completing legal
@@ -395,7 +444,8 @@ carries its own independent exposure. Treat it as the opposite signal by default
     Source states: LC1 RM1,200,000 / TR1 RM1,200,000 / BA1 RM1,200,000 / IVF1 RM1,200,000
     / BG1 RM1,200,000 — five instruments, identical figures, no utilisation data available.
     CORRECT output AT THIS STAGE: ONE row, "Combined Trade 1 (LC1/TR1/BA1/IVF1/BG1)",
-    limit RM1,200,000. WRONG output: five separate rows each at RM1,200,000 (this
+`,
+    `    limit RM1,200,000. WRONG output: five separate rows each at RM1,200,000 (this
     overstates total exposure by RM4,800,000 for this bundle alone, and has been the
     single largest source of error in past runs).
     IMPORTANT — this pooling step is not necessarily the FINAL answer. This exact
@@ -444,7 +494,8 @@ KEEP SEPARATE rows when:
 
 LIMIT DISCREPANCY HANDLING — when documents disagree:
   - If two documents state the same facility's limit differing only by a small cents/decimal
-    remainder (one clean round figure, one oddly precise figure resembling a running balance),
+`,
+    `    remainder (one clean round figure, one oddly precise figure resembling a running balance),
     do NOT silently pick one and hide the disagreement. Use the cleanest, earliest explicitly-
     sanctioned figure as the working approvedLimit, but record BOTH figures and their source
     dates in changeHistory, and add a redFlag naming the discrepancy for auditor confirmation.
@@ -500,7 +551,8 @@ OUTPUT QUALITY STANDARDS — the output is acceptable when:
 6. Settled facilities retained with isSettled: true
 7. HP rates are in decimal format (not percentage)
 8. Repayment terms follow the 3-line format
-9. Security is concise — not verbatim legal text
+`,
+    `9. Security is concise — not verbatim legal text
 10. Red flags clearly identified for auditor review
 11. The "summary" field contains no self-reported counts or numbers — describe what happened qualitatively, by facility/bank name, not by tally
 12. Every facility explicitly marked settled/discharged/absorbed in ANY source document is isSettled: true, and is not double-counted inside whatever it was absorbed into
@@ -512,12 +564,16 @@ OUTPUT QUALITY STANDARDS — the output is acceptable when:
 ═══════════════════════════════════════════════════════════════
 SOURCE DOCUMENTS (in chronological / hierarchy order):
 ═══════════════════════════════════════════════════════════════
-${JSON.stringify(docContext, null, 2)}
+`,
+    JSON.stringify(docContext, null, 2),
+    `
 
 ═══════════════════════════════════════════════════════════════
 RAW EXTRACTED FACILITIES (may contain duplicates across documents):
 ═══════════════════════════════════════════════════════════════
-${JSON.stringify(facilityContext, null, 2)}
+`,
+    JSON.stringify(facilityContext, null, 2),
+    `
 
 ═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT
@@ -574,6 +630,8 @@ a stated adjustment, absorbed into a named successor, etc.), you MUST list its o
 ID in intentionallyOmitted and say why. An ID that appears in neither place will be
 treated as an error and automatically restored with a "needs review" flag — so anything
 you deliberately excluded needs to be declared here to avoid being second-guessed.`
+  ]
+  const prompt = promptParts.join('')
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -615,14 +673,33 @@ you deliberately excluded needs to be declared here to avoid being second-guesse
           // won't parse (e.g. genuine truncation).
           try { result = JSON.parse(sanitizeJsonControlChars(sliced)) }
           catch {
-            console.error('[reconcile] JSON parse failed. stop_reason=', data.stop_reason, 'raw_length=', raw.length, 'raw_tail=', raw.slice(-500))
-            const truncated = data.stop_reason === 'max_tokens'
-            return res.status(500).json({
-              error: truncated
-                ? `Reconciliation response was too long and got cut off (${raw.length.toLocaleString()} characters generated). This batch has too many facilities for one run — tick fewer documents on the Documents tab (e.g. one bank at a time) and reconcile in smaller groups.`
-                : 'Reconciliation returned malformed data. Try again — if it keeps happening on the same document set, that\'s worth reporting.',
-              raw: raw.slice(0,500),
-            })
+            // FIX: confirmed via Vercel runtime logs (10 July 2026) — a real
+            // response ended on a normal, well-formed closing quote for the
+            // "summary" field with stop_reason: end_turn (the model believed
+            // it was done) but never emitted the object's closing brace(s).
+            // The slice above (raw.slice(start, raw.lastIndexOf('}') + 1))
+            // assumes the LAST "}" anywhere in the text is the true outer
+            // closing brace — when the object is genuinely left unclosed at
+            // the end, that assumption finds an EARLIER brace instead (e.g.
+            // the last completed facility object) and silently truncates
+            // real trailing content instead of fixing anything. Try again
+            // from the first "{" to the actual end of the response (not the
+            // guessed last brace), sanitize, and balance whatever brackets
+            // are left open before giving up for real.
+            try {
+              const fromStart = raw.slice(start)
+              result = JSON.parse(balanceJsonBrackets(sanitizeJsonControlChars(fromStart)))
+            }
+            catch {
+              console.error('[reconcile] JSON parse failed. stop_reason=', data.stop_reason, 'raw_length=', raw.length, 'raw_tail=', raw.slice(-500))
+              const truncated = data.stop_reason === 'max_tokens'
+              return res.status(500).json({
+                error: truncated
+                  ? `Reconciliation response was too long and got cut off (${raw.length.toLocaleString()} characters generated). This batch has too many facilities for one run — tick fewer documents on the Documents tab (e.g. one bank at a time) and reconcile in smaller groups.`
+                  : 'Reconciliation returned malformed data. Try again — if it keeps happening on the same document set, that\'s worth reporting.',
+                raw: raw.slice(0,500),
+              })
+            }
           }
         }
       } else {
