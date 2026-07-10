@@ -111,10 +111,29 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
         : `Reconciling ${bankLabel} (${phaseDocs.length} document${phaseDocs.length === 1 ? '' : 's'})…`
     )
 
+    // Tag each facility with whether it's already been through a prior
+    // phase's reconcile (alreadyReconciled: true) or is brand-new raw data
+    // introduced this phase (false). reconcile.js uses this to decide which
+    // facilities it can safely skip fully rewriting — see
+    // "unchangedFacilityIds" handling below. This is the fix for a real
+    // timeout observed in production: once a bank's facilities are mostly
+    // correctly consolidated, the LAST phase still had to regenerate full
+    // rich detail (security text, change history, red flags) for every
+    // single facility, every phase, even ones nothing this round actually
+    // touched — that output volume alone was enough to exceed Vercel's 300s
+    // ceiling. Letting the model just cite "no change" for untouched
+    // facilities instead of rewriting them keeps output size proportional
+    // to what's actually new each phase, not to the total accumulated
+    // facility count.
+    const sentThisPhase = [
+      ...runningReconciled.map(f => ({ ...f, alreadyReconciled: true })),
+      ...newRaw.map(f => ({ ...f, alreadyReconciled: false })),
+    ]
+
     const resp = await fetch('/api/reconcile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ docs: runningDocs, facilities: [...runningReconciled, ...newRaw] }),
+      body: JSON.stringify({ docs: runningDocs, facilities: sentThisPhase }),
     })
     if (!resp.ok) {
       const e = await resp.json().catch(() => ({}))
@@ -136,6 +155,20 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
     }
 
     const newLineage = new Map()
+
+    // Facilities the model explicitly confirmed are untouched this phase —
+    // carried forward VERBATIM (same id, same lineage entry) rather than
+    // regenerated, since nothing about them needs rewriting.
+    const sentById = new Map(sentThisPhase.map(f => [f.id, f]))
+    const unchangedIds = phaseResult.unchangedFacilityIds || []
+    const carriedUnchanged = unchangedIds
+      .map(id => sentById.get(id))
+      .filter(Boolean)
+      .map(({ alreadyReconciled, ...rest }) => rest)
+    carriedUnchanged.forEach(f => {
+      newLineage.set(f.id, lineage.get(f.id) || new Set([f.id]))
+    })
+
     const newReconciled = (phaseResult.reconciledFacilities || []).map(f => {
       const origIds = expandIds(f.mergedFromIds)
       const newId = crypto.randomUUID()
@@ -178,6 +211,7 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
     const accountedThisPhase = new Set([
       ...newReconciled.flatMap(f => f.mergedFromIds || []),
       ...phaseOmitted.flatMap(o => o.ids || []),
+      ...expandIds(unchangedIds),
     ])
     const missingThisPhase = [...rawIdsSeenSoFar].filter(id => !accountedThisPhase.has(id))
     let restoredThisPhase = []
@@ -199,7 +233,7 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
         })
     }
 
-    runningReconciled = [...newReconciled, ...restoredThisPhase]
+    runningReconciled = [...newReconciled, ...restoredThisPhase, ...carriedUnchanged]
     lineage = newLineage
 
     if (phaseResult.summary) summaryParts.push(phaseResult.summary)
