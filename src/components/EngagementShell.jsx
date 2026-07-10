@@ -148,16 +148,84 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
     setResultTab('paper')
     setShowResults(true)
     try {
-      const resp = await fetch('/api/reconcile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ docs: extractedDocs, facilities }),
-      })
-      if (!resp.ok) {
-        const e = await resp.json().catch(() => ({}))
-        throw new Error(e.error || `Server error ${resp.status}`)
+      // ── Batching ─────────────────────────────────────────────────────
+      // A single /api/reconcile call covering every ticked document (seen
+      // live: 7 documents / 53 facilities for Elkom) can run long enough
+      // for Vercel to kill the serverless function before it responds —
+      // the browser then reports a generic "Failed to fetch" rather than
+      // any of this app's own formatted errors, because no response ever
+      // arrived to format. Vercel's Hobby plan enforces a 60s timeout by
+      // default regardless of the maxDuration:300 set in vercel.json,
+      // unless Fluid Compute is separately enabled on the project.
+      //
+      // Fix: split the ticked documents into independent batches and call
+      // /api/reconcile once per batch, sequentially, then combine every
+      // batch's reconciledFacilities/intentionallyOmitted/summary into one
+      // `result` before falling through to the exact same post-processing
+      // (auto-merge clustering, conservation check, dedup, exclusion) that
+      // already ran on a single combined response. Nothing below this
+      // point needs to know batching happened.
+      //
+      // Batches are grouped by bank + loan account (caRefNo), not by date
+      // as first suggested — this is deliberately the SAME boundary
+      // reconcile.js's own "DOCUMENT GROUPING" prompt logic already uses
+      // internally: documents from different banks, or different accounts
+      // at the same bank, never need to be reconciled against each other,
+      // so grouping on this key can never split apart two documents that
+      // actually needed to be seen together. Grouping by date alone could:
+      // two unrelated banks' letters dated the same week would be forced
+      // into the same batch for no reason, and one bank's letters spanning
+      // several dates would be wrongly split apart.
+      function batchKeyOf(doc) {
+        return `${(doc.bankName || '').trim().toLowerCase()}|${(doc.caRefNo || '').trim().toLowerCase()}`
       }
-      const result = await resp.json()
+      const batchGroups = new Map()
+      extractedDocs.forEach(d => {
+        const key = batchKeyOf(d)
+        if (!batchGroups.has(key)) batchGroups.set(key, [])
+        batchGroups.get(key).push(d)
+      })
+      const batches = [...batchGroups.values()]
+        .map(batchDocs => {
+          const batchDocIds = new Set(batchDocs.map(d => d.id))
+          const batchFacilities = facilities.filter(f => (f.sourceDocIds || []).some(id => batchDocIds.has(id)))
+          return { docs: batchDocs, facilities: batchFacilities }
+        })
+        .filter(b => b.facilities.length > 0)
+
+      const combinedReconciledFacilities = []
+      const combinedIntentionallyOmitted = []
+      const summaryParts = []
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i]
+        if (batches.length > 1) {
+          const label = batch.docs[0]?.bankName || `group ${i + 1}`
+          setReconcileSummary(`Reconciling batch ${i + 1} of ${batches.length} (${label})…`)
+        }
+        const resp = await fetch('/api/reconcile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ docs: batch.docs, facilities: batch.facilities }),
+        })
+        if (!resp.ok) {
+          const e = await resp.json().catch(() => ({}))
+          const label = batch.docs[0]?.bankName || `group ${i + 1}`
+          throw new Error(
+            `Batch ${i + 1} of ${batches.length} (${label}) failed: ${e.error || `server error ${resp.status}`}` +
+            (batches.length > 1 ? ' — other batches were not attempted; nothing has been changed yet.' : '')
+          )
+        }
+        const batchResult = await resp.json()
+        combinedReconciledFacilities.push(...(batchResult.reconciledFacilities || []))
+        combinedIntentionallyOmitted.push(...(batchResult.intentionallyOmitted || []))
+        if (batchResult.summary) summaryParts.push(batchResult.summary)
+      }
+      setReconcileSummary('')
+      const result = {
+        reconciledFacilities: combinedReconciledFacilities,
+        intentionallyOmitted: combinedIntentionallyOmitted,
+        summary: summaryParts.join(' '),
+      }
       let reconciled = (result.reconciledFacilities || []).map(f => ({
         facilitySubName: '', approvedLimit: '', amtUtilised: '',
         interestRateText: '', interestRateCalc: '', repaymentLine1: '', repaymentLine2: '',
@@ -566,6 +634,7 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
           loanTotal={loanTotal} hpTotal={hpTotal} grandTotal={grandTotal} grandUtil={grandUtil} grandUnut={grandUnut}
           tab={resultTab} setTab={setResultTab}
           reconciling={reconciling}
+          reconcileProgress={reconciling ? reconcileSummary : ''}
           onExport={() => exportLoanRecords(facilities, eng)}
           onClose={() => setShowResults(false)}
         />

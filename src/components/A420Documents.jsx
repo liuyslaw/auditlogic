@@ -342,6 +342,18 @@ export default function A420Documents({ eng, updateDocs, updateFacilities, updat
           bankName: result.bankName,
           loDate: result.loDate,
           facilityCount: facs.length,
+          // FIX (caRefNo/supersedesDate never reached reconcile): extract.js
+          // has returned these two document-identity fields at the top level
+          // of its response since the multi-document reconcile enhancement,
+          // but this doc record never carried them past extraction — so
+          // reconcile.js's DOCUMENT GROUPING and SAME-DATE MULTI-LETTER
+          // SEQUENCING logic was always receiving empty strings for both,
+          // regardless of what extract.js actually detected. Copying them
+          // onto the doc record here is what makes them visible to
+          // handleReconcile (EngagementShell.jsx), which sends the doc
+          // objects — not just facilities — to /api/reconcile.
+          caRefNo: result.caRefNo || '',
+          supersedesDate: result.supersedesDate || '',
         }
 
         // Update local accumulators — keeps batch-uploaded files intact.
@@ -449,6 +461,9 @@ export default function A420Documents({ eng, updateDocs, updateFacilities, updat
         loDate: result.loDate,
         facilityCount: facs.length,
         errorMsg: undefined,
+        // Same fix as handleFiles above — carry these through on re-run too.
+        caRefNo: result.caRefNo || '',
+        supersedesDate: result.supersedesDate || '',
       }
 
       updateDocsAndFacilities(

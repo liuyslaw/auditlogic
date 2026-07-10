@@ -96,7 +96,7 @@ function ConfirmDialog({ message, onConfirm, onCancel }) {
 }
 
 // ── Results modal: Working Paper + Review Items (Option A) ─────────────────
-export function ResultsModal({ facilities, eng, loanTotal, hpTotal, grandTotal, grandUtil, grandUnut, tab, setTab, reconciling, onExport, onClose }) {
+export function ResultsModal({ facilities, eng, loanTotal, hpTotal, grandTotal, grandUtil, grandUnut, tab, setTab, reconciling, reconcileProgress, onExport, onClose }) {
   const flagged = facilities.filter(f => (f.redFlags?.length > 0) || (f.changeHistory?.length > 0))
   const flagCount = facilities.reduce((s, f) => s + (f.redFlags?.length || 0), 0)
   const loans = facilities.filter(f => f.facilityType === 'L')
@@ -148,8 +148,11 @@ export function ResultsModal({ facilities, eng, loanTotal, hpTotal, grandTotal, 
           <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:14, padding:'50px 20px' }}>
             <Loader size={28} color="var(--gold)" style={{ animation:'spin 1s linear infinite' }}/>
             <div style={{ fontSize:13, color:'var(--text2)', fontWeight:500 }}>Reconciling facilities…</div>
+            {reconcileProgress ? (
+              <div style={{ fontSize:11, color:'var(--gold)', fontWeight:600 }}>{reconcileProgress}</div>
+            ) : null}
             <div style={{ fontSize:11, color:'var(--text3)', textAlign:'center', maxWidth:340 }}>
-              Comparing documents, merging duplicates, and checking for settlement, shared limits and drift. This can take a little while on larger document sets — feel free to switch tabs, this stays running.
+              Comparing documents, merging duplicates, and checking for settlement, shared limits and drift. Larger sets are processed in smaller batches by bank/account, so this can take a little while — feel free to switch tabs, this stays running.
             </div>
           </div>
         ) : (
