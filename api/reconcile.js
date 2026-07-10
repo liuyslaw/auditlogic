@@ -563,6 +563,39 @@ OUTPUT QUALITY STANDARDS — the output is acceptable when:
 16. Every facility where any source document set conditionalIncrease.present = true carries a redFlag describing the conditional portion — no exceptions (see CONTINGENT / CONDITIONAL LIMIT INCREASES above)
 
 ═══════════════════════════════════════════════════════════════
+OUTPUT LENGTH DISCIPLINE — keep every facility's text fields concise
+═══════════════════════════════════════════════════════════════
+
+Every extra sentence of free text (securityBlock, changeHistory, redFlags)
+multiplies generation time across every facility in the batch — on
+engagements with many facilities, this is what pushes a response long
+enough to risk a server timeout before it finishes. Apply these hard caps
+to every facility, not just as a style preference:
+
+  - securityBlock: maximum 8-10 short lines, matching what extraction
+    already captured. When reconciling, CARRY FORWARD the existing concise
+    text rather than re-describing it in more detail or adding narrative.
+    Never expand a security description beyond what the source facility
+    data already contains.
+  - changeHistory: maximum 4 entries per facility. Each entry is ONE short
+    clause, ideally under 15 words (e.g. "Limit revised 1.11.2021
+    (Supplementary LO): RM300,000 -> RM150,000") — a date, the governing
+    document type, and the specific number/term that changed. Never restate
+    unchanged context, never write a full sentence of narrative. If a
+    facility has genuinely been amended more than 4 times, keep the 4 MOST
+    RECENT/MOST MATERIAL changes and drop earlier ones — the source
+    documents remain the record of full history if it's ever needed.
+  - redFlags: each entry is ONE concise sentence, ideally under 25 words —
+    state the issue and what to verify, nothing more. Do not repeat the
+    same underlying fact in both changeHistory and redFlags; state it once,
+    in whichever field it actually belongs.
+
+These caps apply to every facility in every phase/batch, not just large
+engagements — following them costs nothing in correctness, since the
+source documents remain available as the full reference if an auditor
+ever needs more detail than the working paper itself shows.
+
+═══════════════════════════════════════════════════════════════
 SOURCE DOCUMENTS (in chronological / hierarchy order):
 ═══════════════════════════════════════════════════════════════
 `,
