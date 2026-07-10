@@ -551,12 +551,40 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         intentionallyOmitted: combinedIntentionallyOmitted,
         summary: summaryParts.join(' '),
       }
+      // FIX (vanished loan facilities): confirmed real case — a clean,
+      // error-free phased reconcile of Elkom's 7 Hong Leong Bank documents
+      // came back with the correct 6 consolidated facilities, but ALL SIX
+      // silently disappeared from both the on-screen totals and the Excel
+      // export. Root cause: excel.js's exportLoanRecords (and this
+      // component's own loans/hp totals) filter strictly on
+      // facilityType === 'L' or === 'HP' — a facility with any OTHER value,
+      // including a missing/blank one, matches neither filter and simply
+      // never appears anywhere, with no error thrown at any point. The model
+      // reliably sets facilityType on facilities it is actively
+      // constructing/merging this phase, but for a facility carried forward
+      // essentially unchanged across several phases (nothing about it was
+      // "new" that round), it does not always re-state every field on the
+      // output object — facilityType being one of them. This is exactly the
+      // same class of problem the sourceDocIds recomputation below already
+      // exists to solve (the API's own output schema doesn't carry every
+      // field a merged facility needs), so it gets the same treatment: never
+      // trust the model to restate it, backfill it here from the original
+      // raw facility/facilities this one was merged from.
+      const facilityTypeOf = (f) => {
+        if (f.facilityType === 'L' || f.facilityType === 'HP') return f.facilityType
+        const origins = (f.mergedFromIds || [])
+          .map(id => facilities.find(orig => orig.id === id))
+          .filter(Boolean)
+        const found = origins.find(o => o.facilityType === 'L' || o.facilityType === 'HP')
+        return found ? found.facilityType : 'L'
+      }
       let reconciled = (result.reconciledFacilities || []).map(f => ({
         facilitySubName: '', approvedLimit: '', amtUtilised: '',
         interestRateText: '', interestRateCalc: '', repaymentLine1: '', repaymentLine2: '',
         repaymentLine3: '', securityBlock: '', loanCovenant: 'N/A', purposes: '',
         crossRef: '', facilityDate: '', awpRef: '', isSettled: false,
         ...f,
+        facilityType: facilityTypeOf(f),
         facilityName: f.facilityCode || f.facilityName || '',
         id: crypto.randomUUID(),
         engId: eng.id,
