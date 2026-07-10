@@ -90,12 +90,17 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
   bankFacilities.forEach(f => lineage.set(f.id, new Set([f.id])))
   const allOmitted = []
   const summaryParts = []
+  // Original raw facility ids introduced so far, across all phases up to and
+  // including the current one — used by the per-phase conservation check
+  // below.
+  const rawIdsSeenSoFar = new Set()
 
   for (let p = 0; p < phases.length; p++) {
     const phaseDocs = phases[p]
     const phaseDocIds = new Set(phaseDocs.map(d => d.id))
     const newRaw = bankFacilities.filter(f => (f.sourceDocIds || []).some(id => phaseDocIds.has(id)))
     runningDocs = [...runningDocs, ...phaseDocs]
+    newRaw.forEach(f => rawIdsSeenSoFar.add(f.id))
 
     onProgress(
       phases.length > 1
@@ -128,13 +133,56 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
     }
 
     const newLineage = new Map()
-    runningReconciled = (phaseResult.reconciledFacilities || []).map(f => {
+    const newReconciled = (phaseResult.reconciledFacilities || []).map(f => {
       const origIds = expandIds(f.mergedFromIds)
       const newId = crypto.randomUUID()
       newLineage.set(newId, new Set(origIds))
       return { ...f, id: newId, mergedFromIds: origIds }
     })
-    allOmitted.push(...(phaseResult.intentionallyOmitted || []).map(o => ({ ...o, ids: expandIds(o.ids) })))
+    const phaseOmitted = (phaseResult.intentionallyOmitted || []).map(o => ({ ...o, ids: expandIds(o.ids) }))
+    allOmitted.push(...phaseOmitted)
+
+    // Per-phase conservation check — confirmed necessary via a real test run
+    // (7 HLB documents): the model reliably lists mergedFromIds for facilities
+    // it's actively merging THIS phase, but for a facility carried forward
+    // unchanged from a prior phase (nothing new relates to it), it doesn't
+    // always re-state that facility's full original-id lineage. Left
+    // unchecked until the very end, this silently drops those facilities from
+    // tracking across every remaining phase, and the top-level conservation
+    // check in handleReconcile then restores ALL of them at once as raw,
+    // unmerged, duplicate rows — exactly what happened: 6 correctly merged
+    // facilities plus ~47 raw duplicates dumped in behind them.
+    //
+    // Checking after every phase instead of only at the very end catches this
+    // immediately: anything not accounted for is restored right away, as a
+    // clearly flagged standalone facility, and gets carried into the NEXT
+    // phase's input — giving the model a fresh, explicit chance to merge it
+    // properly instead of accumulating losses invisibly until the final dump.
+    const accountedThisPhase = new Set([
+      ...newReconciled.flatMap(f => f.mergedFromIds || []),
+      ...phaseOmitted.flatMap(o => o.ids || []),
+    ])
+    const missingThisPhase = [...rawIdsSeenSoFar].filter(id => !accountedThisPhase.has(id))
+    let restoredThisPhase = []
+    if (missingThisPhase.length > 0) {
+      restoredThisPhase = bankFacilities
+        .filter(f => missingThisPhase.includes(f.id))
+        .map(f => {
+          const newId = crypto.randomUUID()
+          newLineage.set(newId, new Set([f.id]))
+          return {
+            ...f,
+            id: newId,
+            mergedFromIds: [f.id],
+            redFlags: [
+              ...(f.redFlags || []),
+              `Not referenced in reconcile phase ${p + 1} of ${phases.length} — carried forward as a standalone facility so it isn't lost, and will get another chance to be merged in a later phase. If it's still standalone at the end, verify against source.`,
+            ],
+          }
+        })
+    }
+
+    runningReconciled = [...newReconciled, ...restoredThisPhase]
     lineage = newLineage
 
     if (phaseResult.summary) summaryParts.push(phaseResult.summary)
