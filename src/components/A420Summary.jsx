@@ -254,7 +254,7 @@ export function ResultsModal({ facilities, eng, loanTotal, hpTotal, grandTotal, 
 }
 
 // ── Main component ────────────────────────────────────────────────────────
-export default function A420Summary({ eng, updateFacilities, setActiveTab, reconciling, reconcileSummary, reconciledCount, showResults, setShowResults, resultTab, setResultTab, handleReconcile }) {
+export default function A420Summary({ eng, updateFacilities, setActiveTab, reconciling, reconcileSummary, reconciledCount, showResults, setShowResults, resultTab, setResultTab, handleReconcile, batchedReconcile, setBatchedReconcile }) {
   const [editing, setEditing]             = useState(null)
   const [confirm, setConfirm]             = useState(null)
   const [historyView, setHistoryView]     = useState(null)
@@ -635,7 +635,23 @@ export default function A420Summary({ eng, updateFacilities, setActiveTab, recon
           )
         )}
 
-        <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
+        <div style={{ marginLeft:'auto', display:'flex', gap:8, alignItems:'center' }}>
+          {/* Opt-in phased reconcile toggle. Off by default — most engagements
+              have few enough documents per bank that the single-call path
+              (faster, cheaper) finishes fine. Turn this on only for
+              engagements where "Reconcile Facilities" has actually failed
+              with a timeout/server error, e.g. a bank with many related
+              documents (like Elkom's 7 HLB letters) that must all be
+              reconciled together in one continuous chain. See
+              EngagementShell.jsx's reconcileBankPhased for how this works. */}
+          <label
+            title="Splits each bank's documents into small sequential steps (3 at a time) instead of one big call. Slower overall — pays the prompt overhead once per step instead of once total — but avoids server timeouts on engagements with many related documents from one bank. Turn on only if 'Reconcile Facilities' fails with a timeout/server error."
+            style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, color:'var(--text3)', cursor: reconciling?'default':'pointer', whiteSpace:'nowrap' }}>
+            <input type="checkbox" checked={batchedReconcile} disabled={reconciling}
+              onChange={e => setBatchedReconcile(e.target.checked)}
+              style={{ accentColor:'var(--magenta)', cursor: reconciling?'default':'pointer' }} />
+            Batch reconcile (3 docs/bank)
+          </label>
           <button
             // FIX: while a reconcile is already running, clicking this button
             // now reopens the modal instead of doing nothing. Previously it

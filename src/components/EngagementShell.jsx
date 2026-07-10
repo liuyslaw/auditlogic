@@ -6,6 +6,143 @@ import A420Documents from './A420Documents.jsx'
 import A420Summary, { ResultsModal } from './A420Summary.jsx'
 import AIInsight from './AIInsight.jsx'
 
+// ── Phased (incremental) reconcile — an opt-in alternative to the default
+// single-call reconcile above. Vercel Hobby (even with Fluid Compute, which
+// raises the ceiling to 300s) still hard-caps serverless duration, and a
+// bank with many related documents that must all be reconciled together in
+// one continuous chain (e.g. Elkom's 7 Hong Leong Bank Berhad letters,
+// 2018-2024, one loan account) can need more generation time than that
+// ceiling allows. This is not a capability gap — the model handles it fine
+// given enough time — it's purely a hosting-tier constraint, and Lawrence
+// has explicitly chosen not to upgrade Vercel tiers for a pre-production
+// tool.
+//
+// Instead of one call covering all of a bank's documents, this processes
+// them in small chronological phases (default 3 documents each), carrying
+// the PRIOR phase's consolidated reconciledFacilities forward as input to
+// the NEXT phase alongside only that phase's new raw facilities — a
+// "rolling fold." Full document metadata for every document processed so
+// far is sent on every phase (cheap, and reconcile.js's own sequencing
+// logic needs it), but each phase's actual facility payload stays small.
+//
+// This is slower and more expensive in aggregate than a single call would
+// be if it could complete (more repetitions of reconcile.js's large fixed
+// prompt overhead, and some re-generation of already-consolidated facility
+// text on every phase) — but it trades that for NEVER timing out, at the
+// cost of some time and tokens rather than a hard failure. Off by default;
+// the single-call path above remains primary because it's faster/cheaper
+// and most engagements have few enough documents per bank to never hit the
+// timeout at all.
+const RECONCILE_PHASE_SIZE = 3
+
+function parseLoDateClient(s) {
+  if (!s) return null
+  const m = String(s).match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})/)
+  if (!m) return null
+  const [, d, mo, y] = m
+  const t = new Date(Number(y), Number(mo) - 1, Number(d)).getTime()
+  return Number.isNaN(t) ? null : t
+}
+
+// Sorts documents chronologically by loDate (undated docs keep their
+// original relative order) then splits into phases of `phaseSize`, with one
+// guard: a document sharing the exact same loDate as the last document
+// already placed in the current phase is never pushed into a new phase on
+// its own — same-date letters (e.g. an Existing/New Limit pair issued
+// together) must be reconciled in the same phase or the sequencing logic
+// in reconcile.js has nothing to chain them against.
+function chunkDocsIntoPhases(docs, phaseSize) {
+  const withIndex = docs.map((d, i) => ({ d, i, t: parseLoDateClient(d.loDate) }))
+  const sorted = [...withIndex]
+    .sort((a, b) => (a.t === null || b.t === null) ? a.i - b.i : a.t - b.t)
+    .map(x => x.d)
+
+  const phases = []
+  let current = []
+  for (const doc of sorted) {
+    const lastT = current.length > 0 ? parseLoDateClient(current[current.length - 1].loDate) : null
+    const thisT = parseLoDateClient(doc.loDate)
+    const sameDateAsLast = current.length > 0 && lastT !== null && thisT !== null && lastT === thisT
+    if (current.length >= phaseSize && !sameDateAsLast) {
+      phases.push(current)
+      current = []
+    }
+    current.push(doc)
+  }
+  if (current.length > 0) phases.push(current)
+  return phases
+}
+
+// Runs the rolling-fold phased reconcile for one bank's documents/facilities.
+// Returns the same shape as a single /api/reconcile response so the caller
+// can merge it into combinedReconciledFacilities/combinedIntentionallyOmitted
+// exactly like the non-phased path. `lineage` maps each CURRENT facility id
+// back to the set of ORIGINAL raw facility ids it represents, so
+// mergedFromIds/intentionallyOmitted ids stay correct against the original
+// input set across phases — the downstream conservation check, auto-merge,
+// and dedup logic in handleReconcile all depend on that being accurate and
+// need no changes themselves.
+async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgress) {
+  const phases = chunkDocsIntoPhases(bankDocs, RECONCILE_PHASE_SIZE)
+  let runningDocs = []
+  let runningReconciled = []
+  let lineage = new Map()
+  bankFacilities.forEach(f => lineage.set(f.id, new Set([f.id])))
+  const allOmitted = []
+  const summaryParts = []
+
+  for (let p = 0; p < phases.length; p++) {
+    const phaseDocs = phases[p]
+    const phaseDocIds = new Set(phaseDocs.map(d => d.id))
+    const newRaw = bankFacilities.filter(f => (f.sourceDocIds || []).some(id => phaseDocIds.has(id)))
+    runningDocs = [...runningDocs, ...phaseDocs]
+
+    onProgress(
+      phases.length > 1
+        ? `Reconciling ${bankLabel} — phase ${p + 1} of ${phases.length} (${phaseDocs.length} document${phaseDocs.length === 1 ? '' : 's'})…`
+        : `Reconciling ${bankLabel} (${phaseDocs.length} document${phaseDocs.length === 1 ? '' : 's'})…`
+    )
+
+    const resp = await fetch('/api/reconcile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ docs: runningDocs, facilities: [...runningReconciled, ...newRaw] }),
+    })
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}))
+      throw new Error(
+        `${bankLabel} phase ${p + 1} of ${phases.length} failed: ${e.error || `server error ${resp.status}`}` +
+        ' — nothing has been changed yet.'
+      )
+    }
+    const phaseResult = await resp.json()
+
+    const expandIds = (ids) => {
+      const out = new Set()
+      ;(ids || []).forEach(id => {
+        const prior = lineage.get(id)
+        if (prior) prior.forEach(x => out.add(x))
+        else out.add(id)
+      })
+      return [...out]
+    }
+
+    const newLineage = new Map()
+    runningReconciled = (phaseResult.reconciledFacilities || []).map(f => {
+      const origIds = expandIds(f.mergedFromIds)
+      const newId = crypto.randomUUID()
+      newLineage.set(newId, new Set(origIds))
+      return { ...f, id: newId, mergedFromIds: origIds }
+    })
+    allOmitted.push(...(phaseResult.intentionallyOmitted || []).map(o => ({ ...o, ids: expandIds(o.ids) })))
+    lineage = newLineage
+
+    if (phaseResult.summary) summaryParts.push(phaseResult.summary)
+  }
+
+  return { reconciledFacilities: runningReconciled, intentionallyOmitted: allOmitted, summary: summaryParts.join(' ') }
+}
+
 export default function EngagementShell({ eng, updateEngagement, apiKey }) {
   const [activeSection, setActiveSection] = useState('A420')
   const [activeTab, setActiveTab]         = useState('documents') // 'documents' | 'summary' | 'insight'
@@ -19,6 +156,11 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
   const [reconciledCount, setReconciledCount]   = useState(0)
   const [showResults, setShowResults]           = useState(false)
   const [resultTab, setResultTab]               = useState('paper')
+  // Opt-in toggle for the phased reconcile path above — off by default so
+  // the common case (small document sets) stays on the faster, cheaper
+  // single-call path. Turn on for engagements where "Reconcile Facilities"
+  // has actually timed out.
+  const [batchedReconcile, setBatchedReconcile] = useState(false)
 
   function updateFacilities(facsOrFn) {
     updateEngagement(prevEng => ({
@@ -209,6 +351,19 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       const summaryParts = []
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i]
+        const label = batch.docs[0]?.bankName || `group ${i + 1}`
+
+        // Opt-in phased path — see reconcileBankPhased above. Only used
+        // when the user has ticked "Batch reconcile" in the toolbar; the
+        // default remains the single-call path below unchanged.
+        if (batchedReconcile) {
+          const phased = await reconcileBankPhased(label, batch.docs, batch.facilities, setReconcileSummary)
+          combinedReconciledFacilities.push(...phased.reconciledFacilities)
+          combinedIntentionallyOmitted.push(...phased.intentionallyOmitted)
+          if (phased.summary) summaryParts.push(phased.summary)
+          continue
+        }
+
         // FIX: this used to only set progress text when batches.length > 1,
         // on the assumption "batch 1 of 1" isn't useful info. In practice
         // that's exactly backwards — a bank with many related documents
@@ -216,7 +371,6 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         // that single batch is precisely the slow, timeout-risking case
         // where visible progress matters most. Now shown for every batch,
         // worded to fit whether there's 1 or several.
-        const label = batch.docs[0]?.bankName || `group ${i + 1}`
         setReconcileSummary(
           batches.length > 1
             ? `Reconciling batch ${i + 1} of ${batches.length} (${label})…`
@@ -229,7 +383,6 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         })
         if (!resp.ok) {
           const e = await resp.json().catch(() => ({}))
-          const label = batch.docs[0]?.bankName || `group ${i + 1}`
           throw new Error(
             `Batch ${i + 1} of ${batches.length} (${label}) failed: ${e.error || `server error ${resp.status}`}` +
             (batches.length > 1 ? ' — other batches were not attempted; nothing has been changed yet.' : '')
@@ -638,6 +791,8 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
             resultTab={resultTab}
             setResultTab={setResultTab}
             handleReconcile={handleReconcile}
+            batchedReconcile={batchedReconcile}
+            setBatchedReconcile={setBatchedReconcile}
           />
         )}
         {activeTab === 'insight' && (
