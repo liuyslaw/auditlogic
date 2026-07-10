@@ -407,6 +407,36 @@ and others use this exact layout):
     Vehicle Registration Fees plus (v) RM4,374.17 Insurance — both financed into
     the loan and both missing from (iii).
 
+  MANDATORY ARITHMETIC SELF-CHECK, added after a confirmed real error on a
+  Public Bank Hino truck HP (BRR9176) — this recurred EVEN THOUGH the warning
+  above was already in place, because the (iii) row on that document carried a
+  prominent handwritten correction that visually looked like "the final
+  answer," and that made the trap easier to fall into, not harder. A
+  handwritten correction on an earlier row (i, ii, or iii) must still be
+  carried through arithmetically — it does not mean you stop there. The field
+  to extract is always (vi).
+
+  Before finalizing approvedLimit for any Format B document, verify:
+      approvedLimit should equal (iii) + (iv) + (v)
+  using each component's CORRECTED value per STEP 2 (equivalently: (i) − (ii) +
+  (iv) + (v) — the same figure, since (iii) is already (i) − (ii)). If your
+  candidate number does not satisfy this — and especially if it exactly equals
+  (iii) alone, with (iv) and (v) not added in — you have fallen into the trap.
+  Go back and read (vi)'s own printed figure, or compute the sum above.
+
+  CONFIRMED WORKED EXAMPLE — Hino XZC710R (BRR9176), Public Bank, real
+  document: (i) Cash Price of Goods: struck RM146,983.04, corrected
+  (handwritten above) to RM147,383.10. (ii) Deposit RM23,400.00. (iii) Cash
+  Price less Deposit: struck RM123,583.04, corrected (handwritten) to
+  RM123,983.10 — this is ONLY (i) minus (ii), using the corrected Cash Price.
+  (iv) Vehicle Registration Fees: struck RM60.00, corrected to RM110.00. (v)
+  Insurance: struck RM5,356.96, corrected to RM4,906.90. (vi) Total of Items
+  (i),(iii),(iv) and (v) less (ii): printed cleanly with NO further
+  correction, RM129,000.00 — confirmed by (iii)+(iv)+(v) = 123,983.10 + 110.00
+  + 4,906.90 = 129,000.00 exactly. CORRECT approvedLimit = 129000. WRONG (the
+  actual error made on this document): approvedLimit = 123983 — stopping at
+  the corrected (iii) figure, missing the RM5,016.90 from (iv) and (v).
+
 FORMAT C — equipment/machinery HP agreements with a DIFFERENT structure, confirmed
 on a PAC Lease press machine agreement. DO NOT apply Format A/B's rule here — for
 THIS format the correct field is the one that has finance charges ALREADY ADDED,
