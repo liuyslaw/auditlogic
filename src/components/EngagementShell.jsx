@@ -166,18 +166,29 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       // already ran on a single combined response. Nothing below this
       // point needs to know batching happened.
       //
-      // Batches are grouped by bank + loan account (caRefNo), not by date
-      // as first suggested — this is deliberately the SAME boundary
-      // reconcile.js's own "DOCUMENT GROUPING" prompt logic already uses
-      // internally: documents from different banks, or different accounts
-      // at the same bank, never need to be reconciled against each other,
-      // so grouping on this key can never split apart two documents that
-      // actually needed to be seen together. Grouping by date alone could:
-      // two unrelated banks' letters dated the same week would be forced
-      // into the same batch for no reason, and one bank's letters spanning
-      // several dates would be wrongly split apart.
+      // Batches are grouped by BANK ONLY — not bank + caRefNo as first
+      // implemented. That version broke correctness: confirmed on a real
+      // Elkom run (7 HLB documents, one continuous loan account across
+      // 2018-2024) that caRefNo is only reliably extracted off the
+      // ORIGINAL letter — supplements and renewals frequently don't restate
+      // it, or restate it with formatting the model doesn't recognise as
+      // identical. That put each document (or small clumps of them) into
+      // its OWN batch, so almost nothing ever got jointly reconciled —
+      // the working paper came back with every document's facilities
+      // listed as separate, unmerged, undated-superseded rows instead of
+      // one consolidated set per bank. Grouping by bank alone can't
+      // fragment documents that need to be seen together, because
+      // reconcile.js's own "DOCUMENT GROUPING" / caRefNo-sequencing prompt
+      // logic already runs INSIDE each batch to sort out multiple accounts
+      // at the same bank correctly — that's what it was built for, and
+      // it's exactly what ran successfully before batching existed at all.
+      // The real tradeoff this creates: a bank with many related documents
+      // (like Elkom's 7 HLB letters) still lands in ONE batch and gets NO
+      // size reduction — for that case, Fluid Compute (see note above) is
+      // the fix, not batching, because those documents genuinely must be
+      // reconciled together in a single call.
       function batchKeyOf(doc) {
-        return `${(doc.bankName || '').trim().toLowerCase()}|${(doc.caRefNo || '').trim().toLowerCase()}`
+        return (doc.bankName || '').trim().toLowerCase()
       }
       const batchGroups = new Map()
       extractedDocs.forEach(d => {
@@ -198,10 +209,19 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       const summaryParts = []
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i]
-        if (batches.length > 1) {
-          const label = batch.docs[0]?.bankName || `group ${i + 1}`
-          setReconcileSummary(`Reconciling batch ${i + 1} of ${batches.length} (${label})…`)
-        }
+        // FIX: this used to only set progress text when batches.length > 1,
+        // on the assumption "batch 1 of 1" isn't useful info. In practice
+        // that's exactly backwards — a bank with many related documents
+        // (e.g. Elkom's 7 HLB letters) always produces a SINGLE batch, and
+        // that single batch is precisely the slow, timeout-risking case
+        // where visible progress matters most. Now shown for every batch,
+        // worded to fit whether there's 1 or several.
+        const label = batch.docs[0]?.bankName || `group ${i + 1}`
+        setReconcileSummary(
+          batches.length > 1
+            ? `Reconciling batch ${i + 1} of ${batches.length} (${label})…`
+            : `Reconciling ${batch.docs.length} document${batch.docs.length === 1 ? '' : 's'} (${label})…`
+        )
         const resp = await fetch('/api/reconcile', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

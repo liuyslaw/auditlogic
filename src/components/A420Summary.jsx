@@ -605,7 +605,23 @@ export default function A420Summary({ eng, updateFacilities, setActiveTab, recon
           </div>
         )}
 
-        {reconcileSummary ? (
+        {/* Live progress chip — visible even after the modal is dismissed.
+            The modal's own backdrop closes it on any outside click (that's
+            by design — "Hide, keep running" — but before this fix there was
+            NOTHING left visible in the toolbar to show what was happening,
+            and no way to get back into the modal, since the Reconcile button
+            was fully disabled for the whole run. This chip now carries the
+            SAME batch-progress text set in EngagementShell.jsx's
+            handleReconcile (e.g. "Reconciling batch 2 of 4 (HLB)…") while a
+            run is in flight, and reverts to the completed "X reconciled"
+            summary once it finishes — click it any time to reopen the modal. */}
+        {reconciling && reconcileSummary ? (
+          <div onClick={() => setShowResults(true)} title="Click to view progress"
+            style={{ display:'flex',alignItems:'center',gap:7,background:'rgba(184,68,128,0.08)',border:'1px solid rgba(184,68,128,0.25)',borderRadius:6,padding:'4px 10px',fontSize:11,color:'var(--magenta)',cursor:'pointer',whiteSpace:'nowrap' }}>
+            <Loader size={12} style={{flexShrink:0,animation:'spin 1s linear infinite'}}/>
+            {reconcileSummary}
+          </div>
+        ) : reconcileSummary ? (
           <div onClick={() => setShowResults(true)} title="Click to view full results"
             style={{ display:'flex',alignItems:'center',gap:7,background:'rgba(184,68,128,0.08)',border:'1px solid rgba(184,68,128,0.25)',borderRadius:6,padding:'4px 10px',fontSize:11,color:'var(--magenta)',cursor:'pointer',whiteSpace:'nowrap' }}>
             <GitMerge size={12} style={{flexShrink:0}}/>
@@ -621,8 +637,17 @@ export default function A420Summary({ eng, updateFacilities, setActiveTab, recon
 
         <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
           <button
-            onClick={handleReconcile}
-            disabled={reconciling || (eng.uploadedDocs||[]).filter(d=>d.status==='extracted').length < 2}
+            // FIX: while a reconcile is already running, clicking this button
+            // now reopens the modal instead of doing nothing. Previously it
+            // was simply `disabled` for the whole run — the only way back in
+            // was the toolbar chip above, and before this fix that chip
+            // showed a stale/wrong "X reconciled" label (left over from the
+            // PREVIOUS run) during a live batch, or didn't show at all if no
+            // previous run had ever completed. Still blocks starting a
+            // SECOND concurrent reconcile — that part of the guard is
+            // unchanged.
+            onClick={() => { if (reconciling) { setShowResults(true) } else { handleReconcile() } }}
+            disabled={!reconciling && (eng.uploadedDocs||[]).filter(d=>d.status==='extracted').length < 2}
             title="Merge duplicate facilities across Original/Supplement/Renewal docs into one consolidated row per facility"
             style={{
               display:'flex', alignItems:'center', gap:5,
