@@ -264,11 +264,15 @@ If no such contingency exists for this facility, output:
   "conditionalIncrease": { "present": false, "conditionText": "", "unconditionalPortion": 0 }
 
 FIELD 4 — interestRateText + interestRateCalc (Col I)
-  Two-part format:
+  For LOANS (facilityType "L"):
   - interestRateText: exactly as stated e.g. "BLR - 2.59%", "BLR + 0.5%", "2.5% plus BNM Funding rate"
-  - interestRateCalc: computed formula starting with = e.g. "=6.89%-2.59%"
-  - If rate is same as another facility: use cross-reference e.g. "=I35"
-  - For BNM SRF facilities: show both moratorium rate and post-moratorium rate on separate lines
+  - interestRateCalc: always "" (empty string) for loans. Do NOT compute or invent a
+    formula string here (e.g. do NOT write "=6.89%-2.59%" or "=I35") — this field is
+    an Excel-formula placeholder that is never evaluated downstream and only ever
+    corrupts the rate display. interestRateText alone is the full, correct rate for
+    a loan facility — leave interestRateCalc blank.
+  - For BNM SRF facilities: show both moratorium rate and post-moratorium rate on
+    separate lines within interestRateText itself.
 
   For HP only:
   - interestRateCalc: flat rate as decimal e.g. 3.50% flat → 0.035
@@ -303,7 +307,21 @@ FIELD 6 — securityBlock (Col L)
   - Include: guarantor names (IC numbers optional)
   - For upstamped facilities: "Upstamp existing Facilities Agreement to secure principal sum of RMXXX"
   - For HP: always "N/A"
-  - For "Refer A4201": use that phrase verbatim
+  - SHARED/BLANKET SECURITY (one guarantee or charge that secures several facilities
+    together, e.g. a single Combined Trade guarantee covering LC/TR/BA/IVF/OFCL): do
+    NOT write a placeholder or cross-reference phrase like "Refer A4201" — that
+    string is not a real register elsewhere in this system and produces a dead link
+    with no actual content behind it. Instead:
+      - On the ONE facility where the LO document itself states the shared security
+        in full (usually the facility/group heading it is attached to under), write
+        the REAL, concise security summary (guarantor names, charge type, secured
+        sum) per the rules above.
+      - On every OTHER sibling facility that merely shares that same security
+        without restating it, write "N/A" — do not repeat the full text and do not
+        invent a cross-reference placeholder. This matches how the reference
+        working paper itself treats shared security: the detail sits once, on the
+        anchor facility, and sibling rows are left blank/N/A rather than pointing
+        to a placeholder.
 
   DO NOT:
   - Transcribe full legal paragraphs or guarantee clause boilerplate
@@ -501,7 +519,7 @@ Return ONLY valid JSON. No markdown fences. No explanation. No text before or af
       "approvedLimit": 5780000,
       "amtUtilised": "",
       "interestRateText": "BLR - 2.59%",
-      "interestRateCalc": "=6.89%-2.59%",
+      "interestRateCalc": "",
       "repaymentLine1": "23 years by two hundred seventy six (276)",
       "repaymentLine2": "monthly installments of RM29,165.00",
       "repaymentLine3": "each inclusive of interest.",
