@@ -63,8 +63,23 @@ import AIInsight from './AIInsight.jsx'
 //                                    can't be split further — but it will
 //                                    never be BUNDLED with other dense
 //                                    documents the way D407+D408+D412 were.
-const RECONCILE_PHASE_MAX_DOCS = 3
-const RECONCILE_PHASE_MAX_FACILITIES = 8
+// LOCAL-ONLY UNLIMITED MODE — opt-in via VITE_LOCAL_MODE=true, set only in
+// Lawrence's local .env.local (Vite only exposes client-side env vars that
+// are prefixed VITE_) — never set in Vercel's actual Production environment
+// variables. Everything gated behind this flag exists to relax settings that
+// were only ever added to survive Vercel Hobby's 300s serverless timeout;
+// running locally via `vercel dev` has no such ceiling, so there is no
+// reason to pay the same speed/accuracy tradeoff there. Production (the
+// default, this flag unset) behaves exactly as before.
+const LOCAL_MODE = import.meta.env.VITE_LOCAL_MODE === 'true'
+
+// Larger phases locally: fewer, bigger reconcile calls means less repeated
+// fixed-prompt overhead and fewer opportunities for a facility to drift
+// across phase boundaries — the tradeoff Fix7/Fix8 accepted (smaller,
+// cheaper phases) purely to fit inside 300s no longer applies when nothing
+// is timing anything out.
+const RECONCILE_PHASE_MAX_DOCS = LOCAL_MODE ? 8 : 3
+const RECONCILE_PHASE_MAX_FACILITIES = LOCAL_MODE ? 24 : 8
 
 function parseLoDateClient(s) {
   if (!s) return null
@@ -178,8 +193,26 @@ async function reconcileBankPhased(bankLabel, bankDocs, bankFacilities, onProgre
     // facilities instead of rewriting them keeps output size proportional
     // to what's actually new each phase, not to the total accumulated
     // facility count.
+    // LOCAL_MODE: never claim a facility is "already reconciled," even one
+    // carried forward from a prior phase. Root cause this addresses,
+    // confirmed via a real case (Elkom's PEMULIH term loan, RM1,686,137):
+    // once a facility's fields get corrupted or wrongly merged in ANY round
+    // (a bad model response, a naming collision with another generic
+    // "Fixed Term Loan" facility, etc.), marking it alreadyReconciled: true
+    // in every subsequent round means the model is told it can skip
+    // re-examining that facility and reconcile.js's own carry-forward logic
+    // (see unchangedFacilityIds/carriedUnchanged below) just re-ships
+    // whatever was SENT, not re-derived — so a corrupted facility, once
+    // wrong, silently stays wrong forever, self-perpetuating with no
+    // opportunity to self-correct. That optimisation exists purely to keep
+    // output small enough to survive Vercel's 300s ceiling (see the
+    // reconcileBankPhased comment block above) — locally, with no timeout
+    // risk, it's worth paying the cost of a full re-derivation every round
+    // in exchange for a corrupted facility actually getting a chance to
+    // heal itself against the complete document set, instead of the error
+    // being locked in indefinitely.
     const sentThisPhase = [
-      ...runningReconciled.map(f => ({ ...f, alreadyReconciled: true })),
+      ...runningReconciled.map(f => ({ ...f, alreadyReconciled: LOCAL_MODE ? false : true })),
       ...newRaw.map(f => ({ ...f, alreadyReconciled: false })),
     ]
 
