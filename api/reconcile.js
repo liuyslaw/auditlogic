@@ -526,6 +526,43 @@ MERGE into ONE row when:
   - Same facility appears in Original LO + Renewal Letter → one row, ORIGINAL LO date retained, rate updated to renewal rate
   - Facility name differs slightly or drifts over time but the matching signals above confirm it's the same facility
 
+MERGING SECURITY/COVENANT TEXT WHEN SEVERAL RAW FACILITIES COLLAPSE INTO ONE ROW
+— this applies whenever the Independent vs. Shared Limits pooling rule above (or
+any other merge rule on this page) combines MULTIPLE distinct raw facility
+records into a single output row (e.g. five trade instruments — LC/TR/BA/IVF/BG —
+pooled into one "Combined Trade" row). The five underlying raw facilities were
+each extracted separately, and it is common for the security/covenant detail to
+have been captured on only SOME of them (e.g. the Bank Guarantee instrument's own
+extraction states the personal and joint guarantees in full, while the sibling
+LC/TR/BA/IVF instruments in the same bundle show "N/A" because the source
+document only stated the guarantee once, against the instrument it's physically
+printed next to).
+
+DO NOT simply copy the securityBlock/loanCovenant of whichever single raw
+facility happens to be first, last, or largest in the group. Instead, build the
+merged row's securityBlock and loanCovenant as the UNION of every DISTINCT,
+non-"N/A" statement found across ALL the raw facilities being merged into that
+row — include each distinct guarantee, charge, or covenant statement once (do not
+duplicate identical text repeated across siblings), but do not drop a genuine
+statement just because it happened to sit on a sibling instrument rather than the
+instrument that became the "anchor" for the merged row's name. If, after checking
+every raw facility in the group, none of them state any security/covenant detail,
+"N/A" is correct — but this must be a checked conclusion, not a default reached by
+only looking at one raw facility.
+
+  WORKED EXAMPLE: A Combined Trade bundle merges LC/TR/BA/IVF/OFCL raw facilities.
+  Only the OFCL (Bank Guarantee) raw facility's securityBlock states "Personal
+  Guarantee — Yee Kim Yuen RM12,950,000; Joint & Several Guarantee — Yee Kok Bing
+  and Yee Kok Lim RM13,179,090; Corporate Guarantee — Syarikat Jaminan Pembiayaan
+  Perniagaan Bhd." The other four raw facilities (LC/TR/BA/IVF) all show "N/A" for
+  securityBlock because the source LO only printed the guarantee once, under the
+  Bank Guarantee line. CORRECT: the merged Combined Trade row's securityBlock
+  includes the full guarantee text from OFCL — do not let the four "N/A" siblings
+  cause the merged row to also show "N/A". WRONG (a confirmed real gap): merging
+  by simply taking the first or largest instrument's own securityBlock, which
+  produces an empty/N/A security field for a pooled facility that is, in reality,
+  secured by substantial personal and corporate guarantees.
+
 KEEP SEPARATE rows when:
   - Two genuinely distinct facilities from the same bank (e.g. TL3 and TL4 are different loans)
   - A settled facility (limit retained, utilised = 0) alongside an active replacement facility
@@ -573,6 +610,20 @@ Documentation:
   - Two documents give materially different limits for the same facility (>5% difference)
   - Security reference to a property title not consistent across documents
   - HP agreement has amendments without visible countersignature
+  - GUARANTOR NRIC/IC INCONSISTENCY (MANDATORY CHECK — run across the whole batch,
+    not just within one facility): when the same guarantor NAME appears in the
+    securityBlock of two or more facilities in this reconcile batch, compare the
+    IC/NRIC number stated alongside that name each time. If the SAME name is
+    paired with DIFFERENT IC/NRIC numbers across facilities, this is almost
+    always a transcription/OCR error on a scanned source document rather than
+    two different real people — but it must be surfaced, not silently picked
+    one way or the other. Add a redFlag naming the guarantor, both IC/NRIC
+    values seen, and the facilities/banks where each appeared, asking the
+    auditor to verify the correct number against the original source document.
+    Do not attempt to guess which of the two numbers is correct — this tool
+    cannot re-read the scanned image any more reliably than it already has;
+    the point of this flag is to route the discrepancy to a human for
+    verification, not to resolve it automatically.
 
 Completeness:
   - Bank mentioned in engagement but no LO uploaded for that bank
