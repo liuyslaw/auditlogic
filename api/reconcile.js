@@ -169,7 +169,45 @@ export default async function handler(req, res) {
     alreadyReconciled: f.alreadyReconciled || false,
   }))
 
-  const promptParts = [
+  // PROMPT CACHING — added after a confirmed real 504 (Task timed out after
+  // 300 seconds) on Elkom's 7-document Hong Leong Bank run, phase 6 of 7,
+  // even with Fix6 (unchangedFacilityIds), Fix7 (adaptive phase sizing) and
+  // Fix8 (output length discipline) all already live. That phase's single
+  // document happened to revise most of the facilities carried forward from
+  // phases 1-5, so it still had to generate a large response — but a real,
+  // separate inefficiency was also confirmed sitting underneath all of that:
+  // this prompt's ~8,000-word rules section (DOCUMENT GROUPING through
+  // OUTPUT FORMAT) is BYTE-IDENTICAL on every single phase call, yet was
+  // being resent as a plain string and fully reprocessed by the model from
+  // scratch every time — pure repeated overhead that grows with phase count.
+  //
+  // Anthropic's prompt caching (GA, no beta header needed as of this
+  // writing) lets a marked prefix be cached for ~5 minutes and reused on the
+  // next call instead of reprocessed — ideal here since consecutive phases
+  // of the same reconcile run happen well within that window. Split into:
+  //   staticInstructions — everything that never changes between phases
+  //     (rules, worked examples, field priority table, incremental-reconcile
+  //     explanation, output format schema) — sent as the `system` block with
+  //     cache_control, so only the FIRST phase call in a run pays full
+  //     processing cost for it; every subsequent phase reads it from cache.
+  //   userContent — only the genuinely per-phase data (this run's document
+  //     list, this phase's facility list) — sent as the `messages` block,
+  //     never cached, since it's different every time by design.
+  // This does not reduce how many tokens the model must GENERATE (the
+  // actual timeout risk for a dense phase like #6 above) — it specifically
+  // targets the INPUT reprocessing cost that was being paid needlessly on
+  // every phase regardless of density, which should meaningfully cut
+  // per-phase latency across the board and leave more of the 300s ceiling
+  // available for genuinely dense phases to finish generating.
+  //
+  // Note: the INCREMENTAL RECONCILE MODE explanation and OUTPUT FORMAT
+  // schema (previously placed AFTER the per-request facility data, since
+  // they're static they're moved here into the cached block instead — this
+  // reorders the prompt slightly (rules+schema first, data last) but changes
+  // no wording. Instructions-before-data is the standard/recommended
+  // structure for prompt caching and is not expected to affect output
+  // quality.
+  const staticInstructions = [
     `You are a senior Malaysian audit partner at SynerGrowth Consulting (SGC).
 You have extracted facility data independently from multiple related bank documents.
 Your task now is to RECONCILE these extractions into one consolidated A420 working paper — one row per unique real-world facility.
@@ -599,26 +637,17 @@ ever needs more detail than the working paper itself shows.
 SOURCE DOCUMENTS (in chronological / hierarchy order):
 ═══════════════════════════════════════════════════════════════
 `,
-    JSON.stringify(docContext, null, 2),
     `
-
-═══════════════════════════════════════════════════════════════
-RAW EXTRACTED FACILITIES (may contain duplicates across documents):
-═══════════════════════════════════════════════════════════════
-`,
-    JSON.stringify(facilityContext, null, 2),
-    `
-
 ═══════════════════════════════════════════════════════════════
 INCREMENTAL RECONCILE MODE — UNCHANGED FACILITIES
 ═══════════════════════════════════════════════════════════════
 
-Some facilities above are marked "alreadyReconciled": true — these were
-already correctly consolidated in an earlier round (this engagement's
-documents are being processed in batches, oldest first). Do NOT rewrite
-these from scratch every round — that wastes generation time reproducing
-content that hasn't changed, and on large engagements can push the response
-long enough to risk a server timeout.
+Some facilities in the data below may be marked "alreadyReconciled": true —
+these were already correctly consolidated in an earlier round (this
+engagement's documents are being processed in batches, oldest first). Do NOT
+rewrite these from scratch every round — that wastes generation time
+reproducing content that hasn't changed, and on large engagements can push
+the response long enough to risk a server timeout.
 
   - If NOTHING in the current facility data actually affects a given
     alreadyReconciled facility (no document changes its limit, rate,
@@ -699,8 +728,26 @@ intentionallyOmitted and say why. An ID that appears in none of these three plac
 be treated as an error and automatically restored with a "needs review" flag — so
 anything you deliberately excluded or left unchanged needs to be declared here to
 avoid being second-guessed.`
-  ]
-  const prompt = promptParts.join('')
+  ].join('')
+
+  // The only genuinely per-phase content — this run's document list and
+  // this phase's facility list. Deliberately kept OUT of staticInstructions
+  // (and therefore out of the cached block) since it's different on every
+  // single call by design; caching it would never produce a hit and would
+  // only add cache-write overhead for no benefit.
+  const userContent = [
+    JSON.stringify(docContext, null, 2),
+    `
+
+═══════════════════════════════════════════════════════════════
+RAW EXTRACTED FACILITIES (may contain duplicates across documents):
+═══════════════════════════════════════════════════════════════
+`,
+    JSON.stringify(facilityContext, null, 2),
+    `
+
+Return ONLY the JSON object described in the OUTPUT FORMAT section above — no markdown, no explanation, nothing before or after the JSON.`,
+  ].join('')
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -709,7 +756,10 @@ avoid being second-guessed.`
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',  // Always Sonnet for reconciliation — needs strongest reasoning
         max_tokens: 20000,  // Hobby plan hard-caps maxDuration at 300s (see vercel.json) — Vercel rejects anything higher at deploy time, it doesn't just get ignored. At Sonnet 4.6's typical throughput this is roughly what 300s of generation can realistically complete; going much higher risks a 504 timeout instead of a clean response. The durable fix for large batches (40+ facilities) is the selective/per-bank reconcile in the UI, not raising this further — that needs a Pro plan (higher maxDuration ceiling) to be safe.
-        messages: [{ role: 'user', content: prompt }],
+        system: [
+          { type: 'text', text: staticInstructions, cache_control: { type: 'ephemeral' } },
+        ],
+        messages: [{ role: 'user', content: userContent }],
       }),
     })
 
@@ -719,6 +769,13 @@ avoid being second-guessed.`
     }
 
     const data = await resp.json()
+    // Diagnostic only — confirms whether prompt caching is actually landing
+    // hits (cache_read_input_tokens > 0 on phase 2+ of a run means the
+    // ~8,000-word rules block was served from cache instead of reprocessed).
+    // Visible in Vercel runtime logs; no effect on behaviour.
+    if (data.usage) {
+      console.log('[reconcile] usage', JSON.stringify(data.usage))
+    }
     const raw  = data.content?.[0]?.text || ''
     const clean = raw.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim()
 
