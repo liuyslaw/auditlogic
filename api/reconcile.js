@@ -85,6 +85,16 @@ export default async function handler(req, res) {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set in Vercel environment variables.' })
 
+  // LOCAL-ONLY UNLIMITED MODE — opt-in via RECONCILE_LOCAL_MODE=true, set
+  // only in Lawrence's local .env.local / run-local.bat, never in Vercel's
+  // actual Production environment variables. Everything gated behind this
+  // flag relaxes a setting that exists purely to survive Vercel Hobby's 300s
+  // serverless timeout (see the max_tokens comment and OUTPUT LENGTH
+  // DISCIPLINE section below) — running locally via `vercel dev` has no such
+  // ceiling. Production (the default, this flag unset) behaves exactly as
+  // before; nothing changes there unless this is explicitly set.
+  const LOCAL_MODE = process.env.RECONCILE_LOCAL_MODE === 'true'
+
   const { docs, facilities } = req.body
   if (!docs?.length || !facilities?.length) {
     return res.status(400).json({ error: 'No documents or facilities to reconcile.' })
@@ -654,7 +664,19 @@ OUTPUT QUALITY STANDARDS — the output is acceptable when:
 ═══════════════════════════════════════════════════════════════
 OUTPUT LENGTH DISCIPLINE — keep every facility's text fields concise
 ═══════════════════════════════════════════════════════════════
-
+`,
+    LOCAL_MODE ? `
+This run has NO server timeout ceiling (running locally, not on Vercel's
+Hobby plan) — so unlike the note that would normally appear here, do NOT
+compress or truncate securityBlock, changeHistory, or redFlags to hit a
+short line/entry count. Preserve every distinct guarantee, covenant,
+charge, and material change you find in the source facilities in full —
+completeness matters more than brevity in this mode. Still avoid verbatim
+legal boilerplate (see FIELD 6 rules elsewhere) and still write concisely
+per point — just do not artificially cap the NUMBER of points to fit a
+short list. A facility with 6 genuinely distinct guarantees should show
+all 6, not the 4 most material ones.
+` : `
 Every extra sentence of free text (securityBlock, changeHistory, redFlags)
 multiplies generation time across every facility in the batch — on
 engagements with many facilities, this is what pushes a response long
@@ -683,7 +705,8 @@ These caps apply to every facility in every phase/batch, not just large
 engagements — following them costs nothing in correctness, since the
 source documents remain available as the full reference if an auditor
 ever needs more detail than the working paper itself shows.
-
+`,
+    `
 ═══════════════════════════════════════════════════════════════
 SOURCE DOCUMENTS (in chronological / hierarchy order):
 ═══════════════════════════════════════════════════════════════
@@ -806,7 +829,23 @@ Return ONLY the JSON object described in the OUTPUT FORMAT section above — no 
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',  // Always Sonnet for reconciliation — needs strongest reasoning
-        max_tokens: 20000,  // Hobby plan hard-caps maxDuration at 300s (see vercel.json) — Vercel rejects anything higher at deploy time, it doesn't just get ignored. At Sonnet 4.6's typical throughput this is roughly what 300s of generation can realistically complete; going much higher risks a 504 timeout instead of a clean response. The durable fix for large batches (40+ facilities) is the selective/per-bank reconcile in the UI, not raising this further — that needs a Pro plan (higher maxDuration ceiling) to be safe.
+        // Production (LOCAL_MODE off): capped at 20000. Hobby plan hard-caps
+        // maxDuration at 300s (see vercel.json) — Vercel rejects anything
+        // higher at deploy time, it doesn't just get ignored. At Sonnet
+        // 4.6's typical throughput this is roughly what 300s of generation
+        // can realistically complete; going much higher risks a 504 timeout
+        // instead of a clean response.
+        // Local (LOCAL_MODE on): raised to 48000. `vercel dev` has no
+        // duration ceiling, so this is set by the model's own practical
+        // output limit rather than by Vercel — this is the headroom that
+        // lets OUTPUT LENGTH DISCIPLINE's relaxed local variant (above)
+        // actually produce fuller securityBlock/changeHistory/redFlags text
+        // without hitting max_tokens truncation partway through a large
+        // batch. The durable fix for large batches on the DEPLOYED site
+        // remains the selective/per-bank reconcile in the UI, not raising
+        // this further there — that needs a Pro plan (higher maxDuration
+        // ceiling) to be safe.
+        max_tokens: LOCAL_MODE ? 48000 : 20000,
         system: [
           { type: 'text', text: staticInstructions, cache_control: { type: 'ephemeral' } },
         ],
