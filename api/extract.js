@@ -199,16 +199,80 @@ DOCUMENT rather than a date (e.g. "our Letter of Offer Ref XYZ"), still extract
 whatever date is given alongside it; if no date is given at all, leave "".
 
 bankLevelCovenant — financial covenants or conditions stated in THIS document that
-apply to the banking relationship as a whole (or to all facilities under the stated
-caRefNo) rather than to one specific facility row. This is most commonly needed for
-the COVENANT / CONDITIONS AMENDMENT LETTER type above (see STEP 1), but also
-applies when an ordinary Renewal or Original LO opens with general conditions
-before its facility table (extract those into bankLevelCovenant IN ADDITION to any
-facility-specific loanCovenant text on individual facilities — the two are not
-mutually exclusive). State each distinct covenant concisely, one per line, the same
-concise style as FIELD 7 loanCovenant below (e.g. "Minimum Debt Service Coverage
-(DSC) of 1x to be maintained at all times." / "Gearing not to exceed 2.5x at all
-times."). Leave "" if this document states no covenants/conditions at all.
+apply to the banking relationship as a whole (or to all/several facilities under the
+stated caRefNo) rather than to one specific facility row. This is most commonly
+needed for the COVENANT / CONDITIONS AMENDMENT LETTER type above (see STEP 1), but
+applies EQUALLY when an ordinary Original LO or Renewal Letter ALSO has a full
+facility table — general covenants and a facility table are not mutually exclusive,
+and the general covenants can appear ANYWHERE in the document: before the facility
+table, after it, or both. Do not assume bankLevelCovenant is only relevant when
+there is no facility table — that under-reads the far more common case where a
+document has both.
+
+Look specifically for a numbered general-terms section, commonly (but not always)
+titled something like "Financial Covenants", "Dividend Covenant", "Additional
+Conditions Precedent", "Post Disbursement Conditions", or similar — sitting
+alongside the document's OTHER numbered general sections (Base Lending Rate,
+Variation of Rates, Market Disruption, Taxes, Other Terms and Conditions, etc.),
+separate from and in addition to each facility's own "Purpose / Interest Rate /
+Tenure / Other Conditions" subsection. These general sections are usually a mix of
+genuine covenants worth recording and routine legal boilerplate — extract only the
+substantive ones (see the two CONFIRMED REAL CASES below for what counts), and
+leave out routine boilerplate (tax indemnities, ESG representations, the Bank's
+unilateral discretion/refusal rights, governing law/dispute clauses, standard
+insurance/valuation rights) — those add no audit value and just bloat the field.
+
+CONFIRMED REAL CASE 1 (Hong Leong Bank, Elkom, Original LO with a full 9-facility
+table — Fixed TL/OD/LC/TR/BA/IVF/OFCL/BG/FEC): section "8. Dividend Covenant" (after
+the facility table) states "The Borrower shall not declare any dividends in excess
+of 50% of its current financial year's Profit After Tax provided always any such
+permissible declaration of dividends may only be made if debt servicing is
+current." Section "10. Additional Conditions Precedent" and section "13. Post
+Disbursement Conditions" (also after the facility table) between them state several
+more genuine covenants: maintain a current account with an Automatic Fund Transfer
+authorisation; open and maintain a Foreign Currency Account (FCA) for export trade;
+evidence of Paid Up Capital increased by RM1,000,000; subordination of director
+advances of RM5,000,000 throughout the loan tenure; maintain Tangible Net Worth of
+not less than RM15,000,000; maintain the main operating account with the Bank.
+CORRECT: bankLevelCovenant captures ALL of these as one concise list (one line
+each), e.g. "Dividend: not to exceed 50% of current FY PAT, provided debt servicing
+is current.\nMaintain current account with Automatic Fund Transfer authorisation
+for facility servicing.\nMaintain a Foreign Currency Account (FCA) for export
+trade.\nEvidence Paid Up Capital increased by RM1,000,000.\nSubordination of
+director advances of RM5,000,000 throughout the loan tenure.\nMaintain Tangible Net
+Worth of not less than RM15,000,000.\nMaintain main operating account with the
+Bank." — do NOT leave this "" just because the document also has a full facility
+table; that has been a confirmed real gap (this exact case previously extracted
+with bankLevelCovenant empty and every facility's own loanCovenant also "N/A",
+losing every one of these seven covenants entirely).
+
+CONFIRMED REAL CASE 2 (UOB, Elkom, Original LO with a full facility table covering
+OD/LC/TR/FCTR/BA/SG/FG/BEP/GI/IF/FCIF/FX/FL): section "18. Financial Covenants"
+(again, after the facility table, alongside other numbered sections like "19. Taxes,
+duties or levies" and "20. Other Terms and Conditions") states: gearing ratio not to
+exceed 1.50 times (defined as total bank borrowings against tangible net worth plus
+subordinated holding-company advances); minimum tangible net worth of RM23,000,000
+at all times; no dividend, bonus issue or other distribution without the Bank's
+prior written consent; no additional borrowing without the Bank's prior consent
+(excluding hire purchase). Clause "20.7 You shall channel your sales proceeds of not
+less than 60% to the Bank" is also a genuine ongoing covenant worth capturing, even
+though it sits in the "Other Terms and Conditions" section rather than "Financial
+Covenants" — judge each clause on whether it imposes a real ongoing obligation, not
+on which numbered section it happens to sit under. CORRECT: bankLevelCovenant
+captures all of these, e.g. "Gearing ratio not to exceed 1.50x (total bank
+borrowings / tangible net worth plus subordinated holding company advances).
+\nMinimum tangible net worth of RM23,000,000 at all times.\nNo dividend/bonus
+issue/distribution without the Bank's prior written consent.\nNo additional
+borrowing without the Bank's prior consent (excluding hire purchase).\nChannel not
+less than 60% of sales proceeds to the Bank." Sections 19 (Taxes) and most of
+section 20 (the Bank's discretion to refuse utilisation, debenture representations,
+inter-company trade restriction, valuation rights) are routine boilerplate — do NOT
+extract those.
+
+State each distinct covenant concisely, one per line, the same concise style as
+FIELD 7 loanCovenant below. Leave "" only if this document genuinely states no
+covenants/conditions of this kind at all — not merely because a facility table is
+also present.
 
 ═══════════════════════════════════════════════════════════════
 STEP 2 — AMENDED / STRUCK-OFF VALUES
@@ -356,18 +420,39 @@ FIELD 6 — securityBlock (Col L)
 
 FIELD 7 — loanCovenant (Col Q)
   - "N/A" if no covenants
-  - If present, state substance concisely:
+  - If present, state substance concisely. Categories to capture:
     - Dividend covenant: percentage cap, PAT reference, debt service condition
-    - Financial ratios: the ratio and minimum threshold
-    - Net worth covenants: minimum amount
+    - Financial ratios: the ratio and minimum threshold (e.g. gearing, DSC)
+    - Net worth covenants: minimum amount (tangible net worth, shareholders' funds)
     - Change of control: threshold percentage
+    - Paid up capital requirements: minimum amount or required increase
+    - Subordination of director/shareholder advances: amount and duration
+    - Account-maintenance obligations tied to this specific facility: e.g. maintain
+      a Foreign Currency Account (FCA) for trade facilities, maintain a current
+      account with Automatic Fund Transfer (AFT) authorisation for facility
+      servicing, maintain the main operating account with the Bank
+    - Supplier list / buyer list submission or approval conditions attached to a
+      trade facility (LC/TR/BA/IVF/OFCL) — e.g. "Other Conditions: submit list of
+      suppliers for the Bank's records" repeated under a facility's own subsection
+      is a genuine loanCovenant for that row, not boilerplate to discard, even when
+      identical text is repeated verbatim under several sibling trade facilities
+      (each sibling gets its own copy of the same text — do not leave it "N/A" on
+      some rows just because it is not unique to that row)
+  - Do NOT extract as a covenant: routine tax indemnities, ESG/compliance
+    representations, the Bank's unilateral discretion or refusal-to-utilise rights,
+    standard governing law/dispute resolution clauses, insurance or valuation
+    interval clauses — these are boilerplate, not covenants.
   - Common Malaysian format: "Shall not declare any dividend in excess of X% of CY PAT provided debt servicing is current"
-  - This is for covenants stated AGAINST a SPECIFIC facility row. If instead the
-    covenant applies to the whole banking relationship / all facilities under this
-    caRefNo generally (not tied to one row), that belongs in the top-level
-    bankLevelCovenant field (STEP 1B) — not fabricated onto one arbitrarily-chosen
-    facility here. A document can have both: facility-specific loanCovenant text on
-    individual rows, AND general bankLevelCovenant text at the document level.
+  - This is for covenants stated AGAINST a SPECIFIC facility row (including
+    identical boilerplate conditions repeated under that row's own subsection —
+    see supplier list example above). If instead the covenant applies to the whole
+    banking relationship / all facilities under this caRefNo generally (not tied to
+    one row, e.g. a standalone numbered section like "Dividend Covenant" or
+    "Financial Covenants" sitting apart from any facility's own subsection), that
+    belongs in the top-level bankLevelCovenant field (STEP 1B) — not fabricated
+    onto one arbitrarily-chosen facility here. A document can have both:
+    facility-specific loanCovenant text on individual rows, AND general
+    bankLevelCovenant text at the document level.
 
 FIELD 8 — purposes (Col S)
   - Use the purpose AS STATED in the LO — do not paraphrase
