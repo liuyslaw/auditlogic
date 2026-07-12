@@ -36,11 +36,64 @@ function sanitizeJsonControlChars(text) {
   return out
 }
 
+// Repairs a different LLM JSON-generation defect: a response that ran out of
+// steam structurally rather than textually — confirmed via a real Vercel
+// runtime log (10 July 2026, 55,766-character response): the model finished
+// a normal, well-formed "summary" string, closed its final quote, and then
+// simply stopped (stop_reason: end_turn — it believed it was done) without
+// emitting the JSON object's closing brace(s). The existing brace-slice
+// repair above (raw.slice(start, raw.lastIndexOf('}') + 1)) assumes the LAST
+// "}" anywhere in the text is the true outer closing brace; when the object
+// is genuinely left unclosed at the end, that assumption finds some EARLIER
+// brace instead (e.g. the last completed facility object) and silently
+// truncates real trailing content (intentionallyOmitted/summary) rather than
+// fixing anything.
+//
+// This walks the text (respecting string literals/escapes, same approach as
+// sanitizeJsonControlChars) counting unmatched { and [ characters, then
+// appends exactly the closing characters needed, in the correct order, to
+// balance them. If the text was cut off mid-string, closes that string
+// first so the appended braces don't land inside it. No-ops if already
+// balanced.
+function balanceJsonBrackets(text) {
+  const stack = []
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) { escaped = false; continue }
+      if (ch === '\\') { escaped = true; continue }
+      if (ch === '"') { inString = false; continue }
+      continue
+    }
+    if (ch === '"') { inString = true; continue }
+    if (ch === '{' || ch === '[') { stack.push(ch); continue }
+    if (ch === '}' || ch === ']') { stack.pop(); continue }
+  }
+  if (stack.length === 0 && !inString) return text
+  let closer = ''
+  for (let i = stack.length - 1; i >= 0; i--) {
+    closer += stack[i] === '{' ? '}' : ']'
+  }
+  return (inString ? text + '"' : text) + closer
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set in Vercel environment variables.' })
+
+  // LOCAL-ONLY UNLIMITED MODE — opt-in via RECONCILE_LOCAL_MODE=true, set
+  // only in Lawrence's local .env.local / run-local.bat, never in Vercel's
+  // actual Production environment variables. Everything gated behind this
+  // flag relaxes a setting that exists purely to survive Vercel Hobby's 300s
+  // serverless timeout (see the max_tokens comment and OUTPUT LENGTH
+  // DISCIPLINE section below) — running locally via `vercel dev` has no such
+  // ceiling. Production (the default, this flag unset) behaves exactly as
+  // before; nothing changes there unless this is explicitly set.
+  const LOCAL_MODE = process.env.RECONCILE_LOCAL_MODE === 'true'
 
   const { docs, facilities } = req.body
   if (!docs?.length || !facilities?.length) {
@@ -123,9 +176,49 @@ export default async function handler(req, res) {
     purposes: f.purposes, facilityDate: f.facilityDate,
     isSettled: f.isSettled, loDocType: f.loDocType,
     conditionalIncrease: f.conditionalIncrease || { present: false, conditionText: '', unconditionalPortion: 0 },
+    alreadyReconciled: f.alreadyReconciled || false,
   }))
 
-  const prompt = `You are a senior Malaysian audit partner at SynerGrowth Consulting (SGC).
+  // PROMPT CACHING — added after a confirmed real 504 (Task timed out after
+  // 300 seconds) on Elkom's 7-document Hong Leong Bank run, phase 6 of 7,
+  // even with Fix6 (unchangedFacilityIds), Fix7 (adaptive phase sizing) and
+  // Fix8 (output length discipline) all already live. That phase's single
+  // document happened to revise most of the facilities carried forward from
+  // phases 1-5, so it still had to generate a large response — but a real,
+  // separate inefficiency was also confirmed sitting underneath all of that:
+  // this prompt's ~8,000-word rules section (DOCUMENT GROUPING through
+  // OUTPUT FORMAT) is BYTE-IDENTICAL on every single phase call, yet was
+  // being resent as a plain string and fully reprocessed by the model from
+  // scratch every time — pure repeated overhead that grows with phase count.
+  //
+  // Anthropic's prompt caching (GA, no beta header needed as of this
+  // writing) lets a marked prefix be cached for ~5 minutes and reused on the
+  // next call instead of reprocessed — ideal here since consecutive phases
+  // of the same reconcile run happen well within that window. Split into:
+  //   staticInstructions — everything that never changes between phases
+  //     (rules, worked examples, field priority table, incremental-reconcile
+  //     explanation, output format schema) — sent as the `system` block with
+  //     cache_control, so only the FIRST phase call in a run pays full
+  //     processing cost for it; every subsequent phase reads it from cache.
+  //   userContent — only the genuinely per-phase data (this run's document
+  //     list, this phase's facility list) — sent as the `messages` block,
+  //     never cached, since it's different every time by design.
+  // This does not reduce how many tokens the model must GENERATE (the
+  // actual timeout risk for a dense phase like #6 above) — it specifically
+  // targets the INPUT reprocessing cost that was being paid needlessly on
+  // every phase regardless of density, which should meaningfully cut
+  // per-phase latency across the board and leave more of the 300s ceiling
+  // available for genuinely dense phases to finish generating.
+  //
+  // Note: the INCREMENTAL RECONCILE MODE explanation and OUTPUT FORMAT
+  // schema (previously placed AFTER the per-request facility data, since
+  // they're static they're moved here into the cached block instead — this
+  // reorders the prompt slightly (rules+schema first, data last) but changes
+  // no wording. Instructions-before-data is the standard/recommended
+  // structure for prompt caching and is not expected to affect output
+  // quality.
+  const staticInstructions = [
+    `You are a senior Malaysian audit partner at SynerGrowth Consulting (SGC).
 You have extracted facility data independently from multiple related bank documents.
 Your task now is to RECONCILE these extractions into one consolidated A420 working paper — one row per unique real-world facility.
 
@@ -417,7 +510,7 @@ carries its own independent exposure. Treat it as the opposite signal by default
       are conventionally presented in the working paper.
     - If utilisation data isn't available to tell which instrument (if any) is drawn,
       output ONE row representing the bundle (name it after the bundle, e.g. "Combined
-      Trade 2 (LC2/TR2/BA2/IVF2/BG2)") at the shared limit figure, and add a redFlag
+      Trade 2 (LC2/TR2/BA2/IVF2/BG2)"), at the shared limit figure, and add a redFlag
       noting utilisation data was unavailable to identify the drawn instrument.
   Only treat instruments as genuinely INDEPENDENT (list each at full face value) when
   their limits DIFFER from each other, or the document explicitly states each carries
@@ -484,6 +577,43 @@ MERGE into ONE row when:
     NAME-DRIFT-TOLERANT MATCHING above) — merge these by default; treating them as separate
     requires explicit, unambiguous evidence of different loan accounts, not just uncertainty
 
+MERGING SECURITY/COVENANT TEXT WHEN SEVERAL RAW FACILITIES COLLAPSE INTO ONE ROW
+— this applies whenever the Independent vs. Shared Limits pooling rule above (or
+any other merge rule on this page) combines MULTIPLE distinct raw facility
+records into a single output row (e.g. five trade instruments — LC/TR/BA/IVF/BG —
+pooled into one "Combined Trade" row). The five underlying raw facilities were
+each extracted separately, and it is common for the security/covenant detail to
+have been captured on only SOME of them (e.g. the Bank Guarantee instrument's own
+extraction states the personal and joint guarantees in full, while the sibling
+LC/TR/BA/IVF instruments in the same bundle show "N/A" because the source
+document only stated the guarantee once, against the instrument it's physically
+printed next to).
+
+DO NOT simply copy the securityBlock/loanCovenant of whichever single raw
+facility happens to be first, last, or largest in the group. Instead, build the
+merged row's securityBlock and loanCovenant as the UNION of every DISTINCT,
+non-"N/A" statement found across ALL the raw facilities being merged into that
+row — include each distinct guarantee, charge, or covenant statement once (do not
+duplicate identical text repeated across siblings), but do not drop a genuine
+statement just because it happened to sit on a sibling instrument rather than the
+instrument that became the "anchor" for the merged row's name. If, after checking
+every raw facility in the group, none of them state any security/covenant detail,
+"N/A" is correct — but this must be a checked conclusion, not a default reached by
+only looking at one raw facility.
+
+  WORKED EXAMPLE: A Combined Trade bundle merges LC/TR/BA/IVF/OFCL raw facilities.
+  Only the OFCL (Bank Guarantee) raw facility's securityBlock states "Personal
+  Guarantee — Yee Kim Yuen RM12,950,000; Joint & Several Guarantee — Yee Kok Bing
+  and Yee Kok Lim RM13,179,090; Corporate Guarantee — Syarikat Jaminan Pembiayaan
+  Perniagaan Bhd." The other four raw facilities (LC/TR/BA/IVF) all show "N/A" for
+  securityBlock because the source LO only printed the guarantee once, under the
+  Bank Guarantee line. CORRECT: the merged Combined Trade row's securityBlock
+  includes the full guarantee text from OFCL — do not let the four "N/A" siblings
+  cause the merged row to also show "N/A". WRONG (a confirmed real gap): merging
+  by simply taking the first or largest instrument's own securityBlock, which
+  produces an empty/N/A security field for a pooled facility that is, in reality,
+  secured by substantial personal and corporate guarantees.
+
 KEEP SEPARATE rows when:
   - Two genuinely distinct facilities from the same bank (e.g. TL3 and TL4 are different loans)
   - A settled facility (limit retained, utilised = 0) alongside an active replacement facility
@@ -530,6 +660,20 @@ Documentation:
   - Two documents give materially different limits for the same facility (>5% difference)
   - Security reference to a property title not consistent across documents
   - HP agreement has amendments without visible countersignature
+  - GUARANTOR NRIC/IC INCONSISTENCY (MANDATORY CHECK — run across the whole batch,
+    not just within one facility): when the same guarantor NAME appears in the
+    securityBlock of two or more facilities in this reconcile batch, compare the
+    IC/NRIC number stated alongside that name each time. If the SAME name is
+    paired with DIFFERENT IC/NRIC numbers across facilities, this is almost
+    always a transcription/OCR error on a scanned source document rather than
+    two different real people — but it must be surfaced, not silently picked
+    one way or the other. Add a redFlag naming the guarantor, both IC/NRIC
+    values seen, and the facilities/banks where each appeared, asking the
+    auditor to verify the correct number against the original source document.
+    Do not attempt to guess which of the two numbers is correct — this tool
+    cannot re-read the scanned image any more reliably than it already has;
+    the point of this flag is to route the discrepancy to a human for
+    verification, not to resolve it automatically.
 
 Completeness:
   - Bank mentioned in engagement but no LO uploaded for that bank
@@ -561,15 +705,87 @@ OUTPUT QUALITY STANDARDS — the output is acceptable when:
     worked examples above) — an absent or differently-formatted caRefNo is NOT such evidence
 
 ═══════════════════════════════════════════════════════════════
+OUTPUT LENGTH DISCIPLINE — keep every facility's text fields concise
+═══════════════════════════════════════════════════════════════
+`,
+    LOCAL_MODE ? `
+This run has NO server timeout ceiling (running locally, not on Vercel's
+Hobby plan) — so unlike the note that would normally appear here, do NOT
+compress or truncate securityBlock, changeHistory, or redFlags to hit a
+short line/entry count. Preserve every distinct guarantee, covenant,
+charge, and material change you find in the source facilities in full —
+completeness matters more than brevity in this mode. Still avoid verbatim
+legal boilerplate (see FIELD 6 rules elsewhere) and still write concisely
+per point — just do not artificially cap the NUMBER of points to fit a
+short list. A facility with 6 genuinely distinct guarantees should show
+all 6, not the 4 most material ones.
+` : `
+Every extra sentence of free text (securityBlock, changeHistory, redFlags)
+multiplies generation time across every facility in the batch — on
+engagements with many facilities, this is what pushes a response long
+enough to risk a server timeout before it finishes. Apply these hard caps
+to every facility, not just as a style preference:
+
+  - securityBlock: maximum 8-10 short lines, matching what extraction
+    already captured. When reconciling, CARRY FORWARD the existing concise
+    text rather than re-describing it in more detail or adding narrative.
+    Never expand a security description beyond what the source facility
+    data already contains.
+  - changeHistory: maximum 4 entries per facility. Each entry is ONE short
+    clause, ideally under 15 words (e.g. "Limit revised 1.11.2021
+    (Supplementary LO): RM300,000 -> RM150,000") — a date, the governing
+    document type, and the specific number/term that changed. Never restate
+    unchanged context, never write a full sentence of narrative. If a
+    facility has genuinely been amended more than 4 times, keep the 4 MOST
+    RECENT/MOST MATERIAL changes and drop earlier ones — the source
+    documents remain the record of full history if it's ever needed.
+  - redFlags: each entry is ONE concise sentence, ideally under 25 words —
+    state the issue and what to verify, nothing more. Do not repeat the
+    same underlying fact in both changeHistory and redFlags; state it once,
+    in whichever field it actually belongs.
+
+These caps apply to every facility in every phase/batch, not just large
+engagements — following them costs nothing in correctness, since the
+source documents remain available as the full reference if an auditor
+ever needs more detail than the working paper itself shows.
+`,
+    `
+═══════════════════════════════════════════════════════════════
 SOURCE DOCUMENTS (in chronological / hierarchy order):
 ═══════════════════════════════════════════════════════════════
-${JSON.stringify(docContext, null, 2)}
-
+`,
+    `
 ═══════════════════════════════════════════════════════════════
-RAW EXTRACTED FACILITIES (may contain duplicates across documents):
+INCREMENTAL RECONCILE MODE — UNCHANGED FACILITIES
 ═══════════════════════════════════════════════════════════════
-${JSON.stringify(facilityContext, null, 2)}
 
+Some facilities in the data below may be marked "alreadyReconciled": true —
+these were already correctly consolidated in an earlier round (this
+engagement's documents are being processed in batches, oldest first). Do NOT
+rewrite these from scratch every round — that wastes generation time
+reproducing content that hasn't changed, and on large engagements can push
+the response long enough to risk a server timeout.
+
+  - If NOTHING in the current facility data actually affects a given
+    alreadyReconciled facility (no document changes its limit, rate,
+    security, adds a new red flag, or otherwise touches it), list its "id"
+    under "unchangedFacilityIds" in the output and do NOT repeat it in
+    reconciledFacilities at all.
+  - If something genuinely DOES change or add to it (a limit is restated, a
+    new red flag condition now applies, it needs to merge with a newly
+    introduced raw facility, etc.), include the FULL updated facility in
+    reconciledFacilities as normal, with its own id in mergedFromIds so it
+    is not also treated as unaccounted-for.
+  - Facilities NOT marked alreadyReconciled (i.e. newly introduced raw
+    facilities) have never been reconciled — they must always go through
+    reconciledFacilities, even if the correct outcome is simply to keep
+    them as extracted with no changes. Never put a raw, not-yet-reconciled
+    facility's id into unchangedFacilityIds.
+  - Only mark something unchanged after actually checking it against the
+    current round's information — this is a time-saving shortcut for
+    genuinely untouched facilities, not a way to skip real work.
+`,
+    `
 ═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════
@@ -608,6 +824,7 @@ Return ONLY valid JSON. No markdown. No explanation.
       ]
     }
   ],
+  "unchangedFacilityIds": ["id-of-an-alreadyReconciled-facility-with-no-changes-this-round"],
   "intentionallyOmitted": [
     {
       "ids": ["id-of-original-raw-facility"],
@@ -617,14 +834,37 @@ Return ONLY valid JSON. No markdown. No explanation.
   "summary": "2-3 sentence QUALITATIVE summary. Do NOT state any numbers/counts (facility counts, document counts, bank counts, percentages) — the app computes and displays those separately from the actual data, and your count would likely not match. Instead name the specific facilities/banks involved in key merges, and describe the nature of the most significant red flags (e.g. which facility, what discrepancy) without tallying totals."
 }
 
-IMPORTANT — every input facility ID must end up EITHER inside some reconciledFacilities
-entry's mergedFromIds, OR inside intentionallyOmitted with a clear reason. Never just
-leave an input facility unreferenced with no explanation anywhere in the output — if you
-determine a facility should not appear in the working paper (settled, reduced to RM0 by
-a stated adjustment, absorbed into a named successor, etc.), you MUST list its original
-ID in intentionallyOmitted and say why. An ID that appears in neither place will be
-treated as an error and automatically restored with a "needs review" flag — so anything
-you deliberately excluded needs to be declared here to avoid being second-guessed.`
+IMPORTANT — every input facility ID must end up in ONE of: some reconciledFacilities
+entry's mergedFromIds, unchangedFacilityIds (only for facilities marked
+alreadyReconciled: true that genuinely need no changes — see INCREMENTAL RECONCILE
+MODE above), or intentionallyOmitted with a clear reason. Never just leave an input
+facility unreferenced with no explanation anywhere in the output — if you determine a
+facility should not appear in the working paper (settled, reduced to RM0 by a stated
+adjustment, absorbed into a named successor, etc.), you MUST list its original ID in
+intentionallyOmitted and say why. An ID that appears in none of these three places will
+be treated as an error and automatically restored with a "needs review" flag — so
+anything you deliberately excluded or left unchanged needs to be declared here to
+avoid being second-guessed.`
+  ].join('')
+
+  // The only genuinely per-phase content — this run's document list and
+  // this phase's facility list. Deliberately kept OUT of staticInstructions
+  // (and therefore out of the cached block) since it's different on every
+  // single call by design; caching it would never produce a hit and would
+  // only add cache-write overhead for no benefit.
+  const userContent = [
+    JSON.stringify(docContext, null, 2),
+    `
+
+═══════════════════════════════════════════════════════════════
+RAW EXTRACTED FACILITIES (may contain duplicates across documents):
+═══════════════════════════════════════════════════════════════
+`,
+    JSON.stringify(facilityContext, null, 2),
+    `
+
+Return ONLY the JSON object described in the OUTPUT FORMAT section above — no markdown, no explanation, nothing before or after the JSON.`,
+  ].join('')
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -632,8 +872,27 @@ you deliberately excluded needs to be declared here to avoid being second-guesse
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',  // Always Sonnet for reconciliation — needs strongest reasoning
-        max_tokens: 20000,  // Hobby plan hard-caps maxDuration at 300s (see vercel.json) — Vercel rejects anything higher at deploy time, it doesn't just get ignored. At Sonnet 4.6's typical throughput this is roughly what 300s of generation can realistically complete; going much higher risks a 504 timeout instead of a clean response. The durable fix for large batches (40+ facilities) is the selective/per-bank reconcile in the UI, not raising this further — that needs a Pro plan (higher maxDuration ceiling) to be safe.
-        messages: [{ role: 'user', content: prompt }],
+        // Production (LOCAL_MODE off): capped at 20000. Hobby plan hard-caps
+        // maxDuration at 300s (see vercel.json) — Vercel rejects anything
+        // higher at deploy time, it doesn't just get ignored. At Sonnet
+        // 4.6's typical throughput this is roughly what 300s of generation
+        // can realistically complete; going much higher risks a 504 timeout
+        // instead of a clean response.
+        // Local (LOCAL_MODE on): raised to 48000. `vercel dev` has no
+        // duration ceiling, so this is set by the model's own practical
+        // output limit rather than by Vercel — this is the headroom that
+        // lets OUTPUT LENGTH DISCIPLINE's relaxed local variant (above)
+        // actually produce fuller securityBlock/changeHistory/redFlags text
+        // without hitting max_tokens truncation partway through a large
+        // batch. The durable fix for large batches on the DEPLOYED site
+        // remains the selective/per-bank reconcile in the UI, not raising
+        // this further there — that needs a Pro plan (higher maxDuration
+        // ceiling) to be safe.
+        max_tokens: LOCAL_MODE ? 48000 : 20000,
+        system: [
+          { type: 'text', text: staticInstructions, cache_control: { type: 'ephemeral' } },
+        ],
+        messages: [{ role: 'user', content: userContent }],
       }),
     })
 
@@ -643,6 +902,13 @@ you deliberately excluded needs to be declared here to avoid being second-guesse
     }
 
     const data = await resp.json()
+    // Diagnostic only — confirms whether prompt caching is actually landing
+    // hits (cache_read_input_tokens > 0 on phase 2+ of a run means the
+    // ~8,000-word rules block was served from cache instead of reprocessed).
+    // Visible in Vercel runtime logs; no effect on behaviour.
+    if (data.usage) {
+      console.log('[reconcile] usage', JSON.stringify(data.usage))
+    }
     const raw  = data.content?.[0]?.text || ''
     const clean = raw.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim()
 
@@ -666,14 +932,33 @@ you deliberately excluded needs to be declared here to avoid being second-guesse
           // won't parse (e.g. genuine truncation).
           try { result = JSON.parse(sanitizeJsonControlChars(sliced)) }
           catch {
-            console.error('[reconcile] JSON parse failed. stop_reason=', data.stop_reason, 'raw_length=', raw.length, 'raw_tail=', raw.slice(-500))
-            const truncated = data.stop_reason === 'max_tokens'
-            return res.status(500).json({
-              error: truncated
-                ? `Reconciliation response was too long and got cut off (${raw.length.toLocaleString()} characters generated). This batch has too many facilities for one run — tick fewer documents on the Documents tab (e.g. one bank at a time) and reconcile in smaller groups.`
-                : 'Reconciliation returned malformed data. Try again — if it keeps happening on the same document set, that\'s worth reporting.',
-              raw: raw.slice(0,500),
-            })
+            // FIX: confirmed via Vercel runtime logs (10 July 2026) — a real
+            // response ended on a normal, well-formed closing quote for the
+            // "summary" field with stop_reason: end_turn (the model believed
+            // it was done) but never emitted the object's closing brace(s).
+            // The slice above (raw.slice(start, raw.lastIndexOf('}') + 1))
+            // assumes the LAST "}" anywhere in the text is the true outer
+            // closing brace — when the object is genuinely left unclosed at
+            // the end, that assumption finds an EARLIER brace instead (e.g.
+            // the last completed facility object) and silently truncates
+            // real trailing content instead of fixing anything. Try again
+            // from the first "{" to the actual end of the response (not the
+            // guessed last brace), sanitize, and balance whatever brackets
+            // are left open before giving up for real.
+            try {
+              const fromStart = raw.slice(start)
+              result = JSON.parse(balanceJsonBrackets(sanitizeJsonControlChars(fromStart)))
+            }
+            catch {
+              console.error('[reconcile] JSON parse failed. stop_reason=', data.stop_reason, 'raw_length=', raw.length, 'raw_tail=', raw.slice(-500))
+              const truncated = data.stop_reason === 'max_tokens'
+              return res.status(500).json({
+                error: truncated
+                  ? `Reconciliation response was too long and got cut off (${raw.length.toLocaleString()} characters generated). This batch has too many facilities for one run — tick fewer documents on the Documents tab (e.g. one bank at a time) and reconcile in smaller groups.`
+                  : 'Reconciliation returned malformed data. Try again — if it keeps happening on the same document set, that\'s worth reporting.',
+                raw: raw.slice(0,500),
+              })
+            }
           }
         }
       } else {
