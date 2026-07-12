@@ -611,6 +611,46 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         const found = origins.find(o => o.facilityType === 'L' || o.facilityType === 'HP')
         return found ? found.facilityType : 'L'
       }
+      // FIX (vanished loan covenants): confirmed real case — Elkom's reconciled
+      // A420 showed "N/A" for 9 of 10 facilities the reference working paper
+      // records genuine covenants against (CIMB TL2, CIMB TL ADF, four HLB
+      // facilities folded into a "Combined Trade" bundle, UOB Overdraft, UOB
+      // Trust Receipt), and a tenth (HLB Fixed TL) kept only one of its two
+      // source covenants. reconcile.js's own prompt already instructs the model
+      // to build a merged row's loanCovenant as the UNION of every distinct,
+      // non-"N/A" covenant statement across the raw facilities feeding into it
+      // — the same rule it applies to securityBlock — but the model does not
+      // reliably carry this out for loanCovenant specifically; the prompt's own
+      // worked example only demonstrates it for securityBlock. This is the same
+      // class of problem facilityTypeOf/sourceDocIds above already exist to
+      // solve: never trust the model alone to restate every field correctly on
+      // a merged facility — backfill deterministically from the raw
+      // facility/facilities it was merged from, which extract.js already
+      // populates with a per-document loanCovenant (see extract.js FIELD 7).
+      // Keeps the model's own text if it stated something real, then unions in
+      // any DISTINCT non-"N/A" covenant text from every raw facility this row's
+      // mergedFromIds points back to — deduping identical statements repeated
+      // across sibling instruments in the same bundle, same as the security
+      // merge rule's own worked example describes.
+      const loanCovenantOf = (f) => {
+        const isBlank = (t) => !t || !t.trim() || t.trim().toUpperCase() === 'N/A'
+        const seen = new Set()
+        const distinct = []
+        const add = (t) => {
+          const trimmed = (t || '').trim()
+          if (isBlank(trimmed)) return
+          const key = trimmed.toLowerCase()
+          if (seen.has(key)) return
+          seen.add(key)
+          distinct.push(trimmed)
+        }
+        add(f.loanCovenant)
+        const origins = (f.mergedFromIds || [])
+          .map(id => facilities.find(orig => orig.id === id))
+          .filter(Boolean)
+        origins.forEach(o => add(o.loanCovenant))
+        return distinct.length ? distinct.join('\n') : 'N/A'
+      }
       let reconciled = (result.reconciledFacilities || []).map(f => ({
         facilitySubName: '', approvedLimit: '', amtUtilised: '',
         interestRateText: '', interestRateCalc: '', repaymentLine1: '', repaymentLine2: '',
@@ -618,6 +658,7 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         crossRef: '', facilityDate: '', awpRef: '', isSettled: false,
         ...f,
         facilityType: facilityTypeOf(f),
+        loanCovenant: loanCovenantOf(f),
         facilityName: f.facilityCode || f.facilityName || '',
         id: crypto.randomUUID(),
         engId: eng.id,
