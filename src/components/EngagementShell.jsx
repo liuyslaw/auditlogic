@@ -625,6 +625,30 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         const found = origins.find(o => o.facilityType === 'L' || o.facilityType === 'HP')
         return found ? found.facilityType : 'L'
       }
+
+      // Lookup for resolving a document id to its actual filename — used
+      // below to build a DETERMINISTIC crossRef (replacing whatever crossRef
+      // text the model produced) and to tag each covenant statement with the
+      // specific document it came from.
+      //
+      // FIX (crossRef unreliable / not what it claims to be): extract.js and
+      // reconcile.js both instruct the model to leave crossRef ("Cross-ref to
+      // PAF" on export) as an empty string — "assigned by auditor, not
+      // extracted." Confirmed real gap: the model does not follow this. It
+      // populates crossRef anyway, and inconsistently — sometimes a genuine
+      // list of contributing document names, sometimes a bank account/CA
+      // reference number instead (a completely different kind of content),
+      // depending on the run (confirmed: client 1's export showed real
+      // filenames; Elkom's showed a caRefNo-style reference instead, same
+      // field, same instruction, two different kinds of content). Since
+      // reconcile.js already tracks sourceDocIds accurately through every
+      // merge (see facilityTypeOf above), crossRef can be computed
+      // deterministically from that instead of trusting the model at all —
+      // same treatment facilityType and loanCovenant already get below.
+      const docNameById = new Map(docs.map(d => [d.id, d.name]))
+      const crossRefFrom = (sourceDocIds) =>
+        [...new Set((sourceDocIds || []).map(id => docNameById.get(id)).filter(Boolean))].join('; ')
+
       // FIX (vanished loan covenants): confirmed real case — Elkom's reconciled
       // A420 showed "N/A" for 9 of 10 facilities the reference working paper
       // records genuine covenants against (CIMB TL2, CIMB TL ADF, four HLB
@@ -646,23 +670,36 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       // mergedFromIds points back to — deduping identical statements repeated
       // across sibling instruments in the same bundle, same as the security
       // merge rule's own worked example describes.
-      const loanCovenantOf = (f) => {
+      //
+      // FIX (covenant source untraceable — this is the actual point of this
+      // whole change): every covenant statement below is now tagged with the
+      // exact document it came from — "(Source: filename)" — computed
+      // deterministically via the same docNameById lookup crossRef uses
+      // above. The covenant TEXT was rarely the hard part (extract.js reads
+      // it correctly often enough); knowing WHERE a given line came from,
+      // without opening every source PDF by hand, is what was actually
+      // missing. A citation the model has to remember to restate correctly
+      // on every merge is exactly the class of thing this app has already
+      // learned (facilityType, sourceDocIds, loanCovenant unions) not to
+      // trust the model alone for — so this is computed in code instead.
+      const loanCovenantOf = (f, ownSourceDocIds) => {
         const isBlank = (t) => !t || !t.trim() || t.trim().toUpperCase() === 'N/A'
         const seen = new Set()
         const distinct = []
-        const add = (t) => {
+        const addTagged = (t, ids) => {
           const trimmed = (t || '').trim()
           if (isBlank(trimmed)) return
           const key = trimmed.toLowerCase()
           if (seen.has(key)) return
           seen.add(key)
-          distinct.push(trimmed)
+          const names = [...new Set((ids || []).map(id => docNameById.get(id)).filter(Boolean))]
+          distinct.push(names.length ? `${trimmed} (Source: ${names.join('; ')})` : trimmed)
         }
-        add(f.loanCovenant)
+        addTagged(f.loanCovenant, ownSourceDocIds)
         const origins = (f.mergedFromIds || [])
           .map(id => facilities.find(orig => orig.id === id))
           .filter(Boolean)
-        origins.forEach(o => add(o.loanCovenant))
+        origins.forEach(o => addTagged(o.loanCovenant, o.sourceDocIds))
         return distinct.length ? distinct.join('\n') : 'N/A'
       }
       // FIX (CIMB covenants lost entirely — none of loanCovenantOf's inputs ever
@@ -682,43 +719,59 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       // same bank, which is what "banking relationship as a whole" means in practice
       // for a single-borrower engagement like this one. Unions with whatever
       // loanCovenantOf already produced, using the same dedup convention.
+      //
+      // Each document's bankLevelCovenant is split into individual lines
+      // (extract.js now asks for "one covenant per line" — see STEP 1B) so
+      // each distinct statement is tagged with its own source and deduped
+      // separately, rather than tagging one document's whole multi-covenant
+      // block as a single unit.
       const bankLevelCovenantsFor = (bankName) => {
         const norm = (bankName || '').trim().toLowerCase()
         if (!norm) return []
-        return docs
+        const out = []
+        docs
           .filter(d => (d.bankName || '').trim().toLowerCase() === norm && (d.bankLevelCovenant || '').trim())
-          .map(d => d.bankLevelCovenant.trim())
-      }
-      let reconciled = (result.reconciledFacilities || []).map(f => ({
-        facilitySubName: '', approvedLimit: '', amtUtilised: '',
-        interestRateText: '', interestRateCalc: '', repaymentLine1: '', repaymentLine2: '',
-        repaymentLine3: '', securityBlock: '', loanCovenant: 'N/A', purposes: '',
-        crossRef: '', facilityDate: '', awpRef: '', isSettled: false,
-        ...f,
-        facilityType: facilityTypeOf(f),
-        loanCovenant: (() => {
-          const base = loanCovenantOf(f)
-          const bankLevel = bankLevelCovenantsFor(f.bankName)
-          if (bankLevel.length === 0) return base
-          const isBlank = (t) => !t || !t.trim() || t.trim().toUpperCase() === 'N/A'
-          const seen = new Set((isBlank(base) ? [] : base.split('\n')).map(s => s.trim().toLowerCase()))
-          const distinct = isBlank(base) ? [] : base.split('\n').map(s => s.trim())
-          bankLevel.forEach(t => {
-            const key = t.toLowerCase()
-            if (seen.has(key)) return
-            seen.add(key)
-            distinct.push(t)
+          .forEach(d => {
+            (d.bankLevelCovenant || '').split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
+              out.push(`${line} (Source: ${d.name})`)
+            })
           })
-          return distinct.length ? distinct.join('\n') : 'N/A'
-        })(),
-        facilityName: f.facilityCode || f.facilityName || '',
-        id: crypto.randomUUID(),
-        engId: eng.id,
-        bankNo: '1',
-        sourceDocIds: f.mergedFromIds
+        return out
+      }
+      let reconciled = (result.reconciledFacilities || []).map(f => {
+        const sourceDocIds = f.mergedFromIds
           ? [...new Set(facilities.filter(orig => f.mergedFromIds.includes(orig.id)).flatMap(orig => orig.sourceDocIds || []))]
-          : [],
-      }))
+          : (f.sourceDocIds || [])
+        return {
+          facilitySubName: '', approvedLimit: '', amtUtilised: '',
+          interestRateText: '', interestRateCalc: '', repaymentLine1: '', repaymentLine2: '',
+          repaymentLine3: '', securityBlock: '', loanCovenant: 'N/A', purposes: '',
+          crossRef: '', facilityDate: '', awpRef: '', isSettled: false,
+          ...f,
+          facilityType: facilityTypeOf(f),
+          loanCovenant: (() => {
+            const base = loanCovenantOf(f, sourceDocIds)
+            const bankLevel = bankLevelCovenantsFor(f.bankName)
+            if (bankLevel.length === 0) return base
+            const isBlank = (t) => !t || !t.trim() || t.trim().toUpperCase() === 'N/A'
+            const seen = new Set((isBlank(base) ? [] : base.split('\n')).map(s => s.trim().toLowerCase()))
+            const distinct = isBlank(base) ? [] : base.split('\n').map(s => s.trim())
+            bankLevel.forEach(t => {
+              const key = t.toLowerCase()
+              if (seen.has(key)) return
+              seen.add(key)
+              distinct.push(t)
+            })
+            return distinct.length ? distinct.join('\n') : 'N/A'
+          })(),
+          facilityName: f.facilityCode || f.facilityName || '',
+          id: crypto.randomUUID(),
+          engId: eng.id,
+          bankNo: '1',
+          sourceDocIds,
+          crossRef: crossRefFrom(sourceDocIds),
+        }
+      })
 
       // Captured from the model's RAW output, before any of our own
       // post-processing (auto-merge, etc.) touches `reconciled` further —
