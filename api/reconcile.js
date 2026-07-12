@@ -137,6 +137,14 @@ export default async function handler(req, res) {
   const docContextRaw = docs.map(d => ({
     id: d.id, name: d.name, docType: d.detectedType, loDate: d.loDate || '',
     caRefNo: d.caRefNo || '', supersedesDate: d.supersedesDate || '',
+    // Document-level covenant text (e.g. a CIMB "Renewal of Banking
+    // Facility(ies)" letter stating a Minimum DSC and gearing covenant with
+    // no facility limit table at all) — shown here for context/transparency
+    // only. The guaranteed application to every facility of the same bank
+    // happens deterministically in EngagementShell.jsx's bankLevelCovenantsFor,
+    // not here — same never-trust-the-model-alone principle as loanCovenant
+    // merging elsewhere in this file.
+    bankLevelCovenant: d.bankLevelCovenant || '',
   }))
 
   // Index documents by their own loDate so a supersedesDate on one document
