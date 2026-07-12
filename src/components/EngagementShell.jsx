@@ -514,8 +514,22 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       // size reduction — for that case, Fluid Compute (see note above) is
       // the fix, not batching, because those documents genuinely must be
       // reconciled together in a single call.
+      // FIX (CIMB duplicate/unmerged facilities, missing covenants): the
+      // comment block immediately above states batches are grouped by BANK
+      // ONLY, precisely because supplements/renewals often don't restate
+      // caRefNo or restate it in a form the model won't recognise as
+      // identical — but this function was never actually updated to match
+      // that decision; it was still keying on bank + caRefNo. Confirmed real
+      // case: Elkom's CIMB documents landed in separate batches because of
+      // this, so CIMB's original LO and its supplement were never sent to
+      // /api/reconcile together and could never be merged — producing
+      // duplicate CIMB TL2 rows (RM2,000,000 and RM1,672,981 instead of one
+      // consolidated row) and, as a direct consequence, no mergedFromIds for
+      // loanCovenantOf (below) to backfill covenant text from, even though
+      // that fix is otherwise working correctly. Bank name alone is now the
+      // actual key, matching the documented intent.
       function batchKeyOf(doc) {
-        return `${(doc.bankName || '').trim().toLowerCase()}|${(doc.caRefNo || '').trim().toLowerCase()}`
+        return (doc.bankName || '').trim().toLowerCase()
       }
       const batchGroups = new Map()
       extractedDocs.forEach(d => {
