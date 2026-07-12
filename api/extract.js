@@ -123,6 +123,38 @@ RENEWAL LETTER:
   → CRITICAL: approvedLimit = the CREDIT LIMIT / SANCTIONED AMOUNT in this renewal
   → Do NOT use the current outstanding balance or repayment schedule figure as the limit
   → The approved limit is the HIGHER figure shown next to the facility name
+  → IMPORTANT — amortizing term loans specifically: a renewal letter very often restates
+    a term loan's CURRENT REDUCING BALANCE (sometimes explicitly labelled, e.g.
+    "RM1,531,858.33 (Original Limit: RM1,950,000.00)"), not a new sanctioned limit. When
+    you see a parenthetical "(Original Limit: X)" or similar alongside a term loan figure,
+    that confirms the leading figure is the amortized balance — this is a downstream
+    reconciliation concern (retaining the true original limit across documents), but
+    extract BOTH figures here if both are stated, so nothing is lost: put the renewal
+    letter's leading/current figure in approvedLimit as normal, and if an "Original
+    Limit" is explicitly stated alongside it, also add a changeHistory-style note in
+    securityBlock or purposes is NOT appropriate — instead set newLimitTable.present:
+    true with existing = the stated Original Limit and newLimit = the renewal letter's
+    current/reduced figure, exactly as if it were a normal Existing/New Limit table, so
+    downstream reconciliation has both numbers to work with.
+
+COVENANT / CONDITIONS AMENDMENT LETTER (no facility limit table at all):
+  → Some letters — often styled as a "Renewal" or reviewing an existing relationship —
+    state or amend financial covenants/conditions (e.g. minimum Debt Service Coverage,
+    maximum gearing ratio, dividend restrictions, net worth covenants, subordination of
+    director advances) WITHOUT listing any facility-by-facility limit table at all. A
+    confirmed real example: a CIMB Bank letter titled "RE: RENEWAL OF BANKING
+    FACILITY(IES)" contains only two numbered conditions (a Minimum Debt Service
+    Coverage of 1x, and a requirement to maintain gearing of not more than 2.5x) with no
+    "Form of Facility / Existing Limit / Revised Limit" table anywhere in it.
+  → For this type: set "facilities": [] (there is nothing to extract as a facility row —
+    do NOT invent a placeholder facility, and do NOT attach the covenant text to a
+    fabricated row). Instead, capture the covenant/condition text verbatim-but-concise in
+    the top-level "bankLevelCovenant" field (see STEP 1B below) — this is essential; a
+    document of this type that returns an empty bankLevelCovenant has lost real
+    information the auditor needs, even though facilities is correctly empty.
+  → Do not confuse this with an ordinary Renewal Letter that DOES have a facility table
+    (see RENEWAL LETTER above) — if there is a facility table, use that classification
+    and extract facilities as normal; bankLevelCovenant is only for the no-table case.
 
 NEW LO / RESTRUCTURING:
   → Replaces existing loan structure — treat as Original LO
@@ -143,7 +175,7 @@ REPAYMENT SCHEDULE:
 STEP 1B — DOCUMENT IDENTITY & LINEAGE (for multi-document reconciliation)
 ═══════════════════════════════════════════════════════════════
 
-Extract two more pieces of document-level metadata — these let the reconcile step
+Extract three more pieces of document-level metadata — these let the reconcile step
 correctly GROUP and SEQUENCE this document against every other document for the
 same client, instead of relying on bank name and date alone.
 
@@ -165,6 +197,18 @@ letters share the identical date — trust an explicit supersession statement ov
 date comparison. Leave "" if no such statement is present. If the letter names a
 DOCUMENT rather than a date (e.g. "our Letter of Offer Ref XYZ"), still extract
 whatever date is given alongside it; if no date is given at all, leave "".
+
+bankLevelCovenant — financial covenants or conditions stated in THIS document that
+apply to the banking relationship as a whole (or to all facilities under the stated
+caRefNo) rather than to one specific facility row. This is most commonly needed for
+the COVENANT / CONDITIONS AMENDMENT LETTER type above (see STEP 1), but also
+applies when an ordinary Renewal or Original LO opens with general conditions
+before its facility table (extract those into bankLevelCovenant IN ADDITION to any
+facility-specific loanCovenant text on individual facilities — the two are not
+mutually exclusive). State each distinct covenant concisely, one per line, the same
+concise style as FIELD 7 loanCovenant below (e.g. "Minimum Debt Service Coverage
+(DSC) of 1x to be maintained at all times." / "Gearing not to exceed 2.5x at all
+times."). Leave "" if this document states no covenants/conditions at all.
 
 ═══════════════════════════════════════════════════════════════
 STEP 2 — AMENDED / STRUCK-OFF VALUES
@@ -264,15 +308,11 @@ If no such contingency exists for this facility, output:
   "conditionalIncrease": { "present": false, "conditionText": "", "unconditionalPortion": 0 }
 
 FIELD 4 — interestRateText + interestRateCalc (Col I)
-  For LOANS (facilityType "L"):
+  Two-part format:
   - interestRateText: exactly as stated e.g. "BLR - 2.59%", "BLR + 0.5%", "2.5% plus BNM Funding rate"
-  - interestRateCalc: always "" (empty string) for loans. Do NOT compute or invent a
-    formula string here (e.g. do NOT write "=6.89%-2.59%" or "=I35") — this field is
-    an Excel-formula placeholder that is never evaluated downstream and only ever
-    corrupts the rate display. interestRateText alone is the full, correct rate for
-    a loan facility — leave interestRateCalc blank.
-  - For BNM SRF facilities: show both moratorium rate and post-moratorium rate on
-    separate lines within interestRateText itself.
+  - interestRateCalc: computed formula starting with = e.g. "=6.89%-2.59%"
+  - If rate is same as another facility: use cross-reference e.g. "=I35"
+  - For BNM SRF facilities: show both moratorium rate and post-moratorium rate on separate lines
 
   For HP only:
   - interestRateCalc: flat rate as decimal e.g. 3.50% flat → 0.035
@@ -307,21 +347,7 @@ FIELD 6 — securityBlock (Col L)
   - Include: guarantor names (IC numbers optional)
   - For upstamped facilities: "Upstamp existing Facilities Agreement to secure principal sum of RMXXX"
   - For HP: always "N/A"
-  - SHARED/BLANKET SECURITY (one guarantee or charge that secures several facilities
-    together, e.g. a single Combined Trade guarantee covering LC/TR/BA/IVF/OFCL): do
-    NOT write a placeholder or cross-reference phrase like "Refer A4201" — that
-    string is not a real register elsewhere in this system and produces a dead link
-    with no actual content behind it. Instead:
-      - On the ONE facility where the LO document itself states the shared security
-        in full (usually the facility/group heading it is attached to under), write
-        the REAL, concise security summary (guarantor names, charge type, secured
-        sum) per the rules above.
-      - On every OTHER sibling facility that merely shares that same security
-        without restating it, write "N/A" — do not repeat the full text and do not
-        invent a cross-reference placeholder. This matches how the reference
-        working paper itself treats shared security: the detail sits once, on the
-        anchor facility, and sibling rows are left blank/N/A rather than pointing
-        to a placeholder.
+  - For "Refer A4201": use that phrase verbatim
 
   DO NOT:
   - Transcribe full legal paragraphs or guarantee clause boilerplate
@@ -336,6 +362,12 @@ FIELD 7 — loanCovenant (Col Q)
     - Net worth covenants: minimum amount
     - Change of control: threshold percentage
   - Common Malaysian format: "Shall not declare any dividend in excess of X% of CY PAT provided debt servicing is current"
+  - This is for covenants stated AGAINST a SPECIFIC facility row. If instead the
+    covenant applies to the whole banking relationship / all facilities under this
+    caRefNo generally (not tied to one row), that belongs in the top-level
+    bankLevelCovenant field (STEP 1B) — not fabricated onto one arbitrarily-chosen
+    facility here. A document can have both: facility-specific loanCovenant text on
+    individual rows, AND general bankLevelCovenant text at the document level.
 
 FIELD 8 — purposes (Col S)
   - Use the purpose AS STATED in the LO — do not paraphrase
@@ -425,36 +457,6 @@ and others use this exact layout):
     Vehicle Registration Fees plus (v) RM4,374.17 Insurance — both financed into
     the loan and both missing from (iii).
 
-  MANDATORY ARITHMETIC SELF-CHECK, added after a confirmed real error on a
-  Public Bank Hino truck HP (BRR9176) — this recurred EVEN THOUGH the warning
-  above was already in place, because the (iii) row on that document carried a
-  prominent handwritten correction that visually looked like "the final
-  answer," and that made the trap easier to fall into, not harder. A
-  handwritten correction on an earlier row (i, ii, or iii) must still be
-  carried through arithmetically — it does not mean you stop there. The field
-  to extract is always (vi).
-
-  Before finalizing approvedLimit for any Format B document, verify:
-      approvedLimit should equal (iii) + (iv) + (v)
-  using each component's CORRECTED value per STEP 2 (equivalently: (i) − (ii) +
-  (iv) + (v) — the same figure, since (iii) is already (i) − (ii)). If your
-  candidate number does not satisfy this — and especially if it exactly equals
-  (iii) alone, with (iv) and (v) not added in — you have fallen into the trap.
-  Go back and read (vi)'s own printed figure, or compute the sum above.
-
-  CONFIRMED WORKED EXAMPLE — Hino XZC710R (BRR9176), Public Bank, real
-  document: (i) Cash Price of Goods: struck RM146,983.04, corrected
-  (handwritten above) to RM147,383.10. (ii) Deposit RM23,400.00. (iii) Cash
-  Price less Deposit: struck RM123,583.04, corrected (handwritten) to
-  RM123,983.10 — this is ONLY (i) minus (ii), using the corrected Cash Price.
-  (iv) Vehicle Registration Fees: struck RM60.00, corrected to RM110.00. (v)
-  Insurance: struck RM5,356.96, corrected to RM4,906.90. (vi) Total of Items
-  (i),(iii),(iv) and (v) less (ii): printed cleanly with NO further
-  correction, RM129,000.00 — confirmed by (iii)+(iv)+(v) = 123,983.10 + 110.00
-  + 4,906.90 = 129,000.00 exactly. CORRECT approvedLimit = 129000. WRONG (the
-  actual error made on this document): approvedLimit = 123983 — stopping at
-  the corrected (iii) figure, missing the RM5,016.90 from (iv) and (v).
-
 FORMAT C — equipment/machinery HP agreements with a DIFFERENT structure, confirmed
 on a PAC Lease press machine agreement. DO NOT apply Format A/B's rule here — for
 THIS format the correct field is the one that has finance charges ALREADY ADDED,
@@ -510,6 +512,7 @@ Return ONLY valid JSON. No markdown fences. No explanation. No text before or af
   "loDate": "DD.MM.YYYY",
   "caRefNo": "BLK/2013/00000000084",
   "supersedesDate": "",
+  "bankLevelCovenant": "",
   "facilities": [
     {
       "facilityType": "L",
@@ -519,7 +522,7 @@ Return ONLY valid JSON. No markdown fences. No explanation. No text before or af
       "approvedLimit": 5780000,
       "amtUtilised": "",
       "interestRateText": "BLR - 2.59%",
-      "interestRateCalc": "",
+      "interestRateCalc": "=6.89%-2.59%",
       "repaymentLine1": "23 years by two hundred seventy six (276)",
       "repaymentLine2": "monthly installments of RM29,165.00",
       "repaymentLine3": "each inclusive of interest.",
@@ -559,6 +562,10 @@ Field rules:
   STEP 1B. Empty string if not present on the document.
 - supersedesDate: the date of the earlier LO this document explicitly supersedes/
   cancels, if stated — see STEP 1B. Empty string if no such statement is present.
+- bankLevelCovenant: financial covenants/conditions applying to the banking
+  relationship as a whole rather than one facility row — see STEP 1B and the
+  COVENANT / CONDITIONS AMENDMENT LETTER document type in STEP 1. Empty string if
+  this document states no such general covenants/conditions.
 - newLimitTable: THIS FIELD MATTERS — many Malaysian Supplementary/Renewal LOs present
   changes as a table with columns "Existing (RM)" | "Change +/- (RM)" | "New Limit (RM)".
   Whenever you see this table format for a facility — a term loan, a trade instrument,
@@ -568,7 +575,10 @@ Field rules:
   just the ones that look unusual. If the document does not use this table format for a
   facility, leave present: false and ignore the other three sub-fields (defaults are fine).
   Get this right even for facilities where the New Limit is nil — that is exactly the
-  case this field exists to catch reliably.
+  case this field exists to catch reliably. For an amortizing term loan renewal that
+  states a parenthetical "(Original Limit: X)" alongside a reduced current figure, also
+  use this field: existing = the stated Original Limit, newLimit = the renewal's current/
+  reduced figure — see the RENEWAL LETTER note in STEP 1 above.
 - conditionalIncrease: see FIELD 3B above — flags when part of a New Limit increase is
   contingent on a future performance milestone rather than routine documentation
   conditions. approvedLimit still uses the full New Limit regardless; this field only
