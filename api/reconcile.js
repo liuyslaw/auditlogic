@@ -275,18 +275,27 @@ as grounds to treat same-bank, same-borrower documents as unrelated.
   Original at RM2,000,000, the Supplement at RM1,672,981 — and a "Term Loan -
   Automation & Digitalisation Facility (TL ADF)" at RM2,600,000 in BOTH documents.
   CORRECT: treat both documents as the SAME facility relationship (caRefNo is
-  absent on both, which is inconclusive, not a mismatch) and MERGE: one TL2 row
-  at RM1,672,981 (the Supplement's restated figure — see Field Priority Table,
-  Approved Limit), one TL ADF row at RM2,600,000 (unchanged), each carrying
-  forward covenant/security text from whichever document stated it. WRONG,
-  actually observed in a real run: treating the two documents as unrelated and
-  outputting FOUR separate CIMB rows (TL2 at RM2,000,000, TL2 at RM1,672,981,
-  TL ADF at RM2,600,000 twice) — this happens when the model over-weights the
-  absence of a caRefNo as if it were evidence of a different loan account,
-  instead of correctly treating it as no signal at all and falling through to
-  bank+borrower+continuity, which clearly point to one relationship here (same
-  bank, same borrower, same facility codes, no continuity-breaking language
-  anywhere in either document).
+  absent on both, which is inconclusive, not a mismatch) and MERGE into ONE row
+  per facility — one TL2 row, one TL ADF row — not four separate CIMB rows. TL2
+  is an amortizing term loan, so its approvedLimit is NOT simply "whichever
+  document is later": apply the MANDATORY CARVE-OUT — AMORTIZING TERM LOANS
+  section below — RM1,672,981 is TL2's reducing balance as at the Supplement,
+  not a new sanctioned limit, so the merged row's approvedLimit is RM2,000,000
+  (TL2's true original sanction, confirmed against source: the Original LO shows
+  it as a brand-new facility at that figure), with RM1,672,981 recorded in
+  changeHistory instead. TL ADF stays at RM2,600,000 (unchanged in both
+  documents). WRONG, actually observed in a real run: treating the two documents
+  as unrelated and outputting FOUR separate CIMB rows (TL2 at RM2,000,000, TL2
+  at RM1,672,981, TL ADF at RM2,600,000 twice) — this happens when the model
+  over-weights the absence of a caRefNo as if it were evidence of a different
+  loan account, instead of correctly treating it as no signal at all and falling
+  through to bank+borrower+continuity, which clearly point to one relationship
+  here (same bank, same borrower, same facility codes, no continuity-breaking
+  language anywhere in either document). ALSO WRONG, a subtler version of the
+  same mistake: correctly merging into one TL2 row but reporting RM1,672,981 as
+  its approvedLimit — that solves the document-grouping half of this example but
+  repeats the exact reducing-balance error the CARVE-OUT section below exists to
+  prevent. Get both halves right: one row, AND the true original limit.
 
 ═══════════════════════════════════════════════════════════════
 SAME-DATE MULTI-LETTER SEQUENCING
