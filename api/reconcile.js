@@ -264,8 +264,7 @@ same-date documents, check whether one document's "Existing (RM)" figure equals
 the OTHER document's "New Limit (RM)" figure. The document whose Existing figure
 matches the other's New Limit comes SECOND (it is amending the position the
 first letter just established). Chain multiple same-date letters this way if
-`,
-    `there are more than two.
+there are more than two.
 
   WORKED EXAMPLE: Letter A (dated 6.12.2024) shows Combined Trade Existing
   RM8,500,000 → New Limit RM13,500,000. Letter B (also dated 6.12.2024) shows
@@ -319,8 +318,7 @@ When the same facility appears across multiple documents and values differ:
   Repayment Terms:    Original LO → Supplement overrides if changed → Renewal overrides if restated
   Security:           Original LO → Supplement overrides if changed → Renewal CARRIES FORWARD (security rarely changes at renewal)
   Loan Covenants:     Original LO → Supplement overrides if changed → Renewal CARRIES FORWARD
-`,
-    `  Purposes:           Original LO → CARRIES FORWARD through all subsequent documents
+  Purposes:           Original LO → CARRIES FORWARD through all subsequent documents
   Facility Date:      ALWAYS the date of the ORIGINAL agreement that first established the
                       facility (Original LO date, or Supplementary LO date if the facility was
                       first introduced there). Renewal Letters, rate repricing, or restructuring
@@ -365,8 +363,7 @@ loan and trade facility alike, with zero exceptions.
 METHOD 1 — PREFERRED: read the bank's own computed "New Limit" column directly.
 
 Malaysian Supplementary LOs very commonly present changes as an explicit table with
-`,
-    `columns "Existing (RM)" | "Change +/- (RM)" | "New Limit (RM)" — the bank has ALREADY
+columns "Existing (RM)" | "Change +/- (RM)" | "New Limit (RM)" — the bank has ALREADY
 done the arithmetic for you. When this table format is present:
   - Extract the "New Limit" column value directly as the facility's limit. Do NOT
     recompute it yourself, and do NOT fall back to the "Existing" column.
@@ -407,8 +404,7 @@ decision.
     The SAME Supplementary LO's table also shows five trade instruments (LC1/TR1/BA1/
     IVF1/BG1, "Combined Trade 1"), each existing at RM1,200,000, each with Change
     -RM1,200,000, each New Limit "-". A separate bundle (Combined Trade 2, LC2/TR2/BA2/
-`,
-    `    IVF2/BG2) existing at RM1,200,000 shows Change +RM2,200,000, New Limit RM3,400,000.
+    IVF2/BG2) existing at RM1,200,000 shows Change +RM2,200,000, New Limit RM3,400,000.
     CORRECT: Combined Trade 1 omitted entirely (New Limit is nil, exactly like Example
     1's term loan above); Combined Trade 2 shown at RM3,400,000, original 15.10.2021
     date retained per the Facility Date rule (the Supplementary LO changes the limit,
@@ -452,8 +448,7 @@ approvedLimit itself only shows the combined total.
   WORKED EXAMPLE: A facility's New Limit is RM16,500,000, made up of an
   unconditional RM13,500,000 plus a conditional RM3,000,000 (per
   conditionalIncrease.conditionText: "upon six (6) months turnover reach/achieve
-`,
-    `  RM50,000,000-00 and completion of legal documentations"). CORRECT:
+  RM50,000,000-00 and completion of legal documentations"). CORRECT:
   approvedLimit = 16500000. redFlags includes: "RM3,000,000 of this facility's
   RM16,500,000 limit (Combined Trade, HLB, 6.12.2024) is conditional on the
   Borrower sustaining RM50,000,000 turnover over six months and completing legal
@@ -493,8 +488,7 @@ carries its own independent exposure. Treat it as the opposite signal by default
     Source states: LC1 RM1,200,000 / TR1 RM1,200,000 / BA1 RM1,200,000 / IVF1 RM1,200,000
     / BG1 RM1,200,000 — five instruments, identical figures, no utilisation data available.
     CORRECT output AT THIS STAGE: ONE row, "Combined Trade 1 (LC1/TR1/BA1/IVF1/BG1)",
-`,
-    `    limit RM1,200,000. WRONG output: five separate rows each at RM1,200,000 (this
+    limit RM1,200,000. WRONG output: five separate rows each at RM1,200,000 (this
     overstates total exposure by RM4,800,000 for this bundle alone, and has been the
     single largest source of error in past runs).
     IMPORTANT — this pooling step is not necessarily the FINAL answer. This exact
@@ -580,8 +574,7 @@ KEEP SEPARATE rows when:
 
 LIMIT DISCREPANCY HANDLING — when documents disagree:
   - If two documents state the same facility's limit differing only by a small cents/decimal
-`,
-    `    remainder (one clean round figure, one oddly precise figure resembling a running balance),
+    remainder (one clean round figure, one oddly precise figure resembling a running balance),
     do NOT silently pick one and hide the disagreement. Use the cleanest, earliest explicitly-
     sanctioned figure as the working approvedLimit, but record BOTH figures and their source
     dates in changeHistory, and add a redFlag naming the discrepancy for auditor confirmation.
@@ -651,8 +644,7 @@ OUTPUT QUALITY STANDARDS — the output is acceptable when:
 6. Settled facilities retained with isSettled: true
 7. HP rates are in decimal format (not percentage)
 8. Repayment terms follow the 3-line format
-`,
-    `9. Security is concise — not verbatim legal text
+9. Security is concise — not verbatim legal text
 10. Red flags clearly identified for auditor review
 11. The "summary" field contains no self-reported counts or numbers — describe what happened qualitatively, by facility/bank name, not by tally
 12. Every facility explicitly marked settled/discharged/absorbed in ANY source document is isSettled: true, and is not double-counted inside whatever it was absorbed into
