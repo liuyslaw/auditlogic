@@ -665,6 +665,30 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         origins.forEach(o => add(o.loanCovenant))
         return distinct.length ? distinct.join('\n') : 'N/A'
       }
+      // FIX (CIMB covenants lost entirely — none of loanCovenantOf's inputs ever
+      // had them): confirmed real case — a CIMB "Renewal of Banking Facility(ies)"
+      // letter states two genuine covenants (Minimum Debt Service Coverage of 1x,
+      // gearing not more than 2.5x) but has NO facility-by-facility limit table at
+      // all, so there is no raw facility row for loanCovenantOf above to ever pull
+      // this text from — the covenant applies to the banking relationship as a
+      // whole, not to any one facility. extract.js now surfaces this via a new
+      // document-level bankLevelCovenant field (see extract.js STEP 1B), carried
+      // through onto each doc record by A420Documents.jsx — but same as
+      // facilityTypeOf/loanCovenantOf above, this must be applied deterministically
+      // in code, not left to the reconcile model to remember to fold in, since nothing
+      // upstream ties a document-level field to a specific facility row for it to
+      // union against. Matches purely on bankName (case-insensitive, trimmed) — a
+      // covenant stated on ANY document for a bank applies to every facility of that
+      // same bank, which is what "banking relationship as a whole" means in practice
+      // for a single-borrower engagement like this one. Unions with whatever
+      // loanCovenantOf already produced, using the same dedup convention.
+      const bankLevelCovenantsFor = (bankName) => {
+        const norm = (bankName || '').trim().toLowerCase()
+        if (!norm) return []
+        return docs
+          .filter(d => (d.bankName || '').trim().toLowerCase() === norm && (d.bankLevelCovenant || '').trim())
+          .map(d => d.bankLevelCovenant.trim())
+      }
       let reconciled = (result.reconciledFacilities || []).map(f => ({
         facilitySubName: '', approvedLimit: '', amtUtilised: '',
         interestRateText: '', interestRateCalc: '', repaymentLine1: '', repaymentLine2: '',
@@ -672,7 +696,21 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         crossRef: '', facilityDate: '', awpRef: '', isSettled: false,
         ...f,
         facilityType: facilityTypeOf(f),
-        loanCovenant: loanCovenantOf(f),
+        loanCovenant: (() => {
+          const base = loanCovenantOf(f)
+          const bankLevel = bankLevelCovenantsFor(f.bankName)
+          if (bankLevel.length === 0) return base
+          const isBlank = (t) => !t || !t.trim() || t.trim().toUpperCase() === 'N/A'
+          const seen = new Set((isBlank(base) ? [] : base.split('\n')).map(s => s.trim().toLowerCase()))
+          const distinct = isBlank(base) ? [] : base.split('\n').map(s => s.trim())
+          bankLevel.forEach(t => {
+            const key = t.toLowerCase()
+            if (seen.has(key)) return
+            seen.add(key)
+            distinct.push(t)
+          })
+          return distinct.length ? distinct.join('\n') : 'N/A'
+        })(),
         facilityName: f.facilityCode || f.facilityName || '',
         id: crypto.randomUUID(),
         engId: eng.id,
