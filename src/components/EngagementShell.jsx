@@ -778,6 +778,99 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
         reconciled = [...reconciled.filter(f => !mergedIds.has(f.id)), ...autoMergedRows]
       }
 
+      // FIX (CIMB TL/TL2 duplicate rows never merged): confirmed real case —
+      // even after the batchKeyOf fix above puts CIMB's documents into the
+      // same reconcile call, the model still returned CIMB's "Term Loan 2
+      // (TL2)" as TWO separate reconciledFacilities rows (RM2,000,000 and
+      // RM1,672,981) and "TL ADF" as two IDENTICAL RM2,600,000 rows, instead
+      // of recognising them as one facility restated across an Original LO
+      // and its Supplement — most likely because neither source document
+      // restates a caRefNo, and the model over-weighted that absence as
+      // evidence of a different loan account rather than as no signal at
+      // all. reconcile.js's prompt has been strengthened to correct this
+      // directly, but this is the same class of problem facilityTypeOf/
+      // loanCovenantOf above already exist to solve for FIELDS within a row
+      // — prompt wording alone has repeatedly proven unreliable in this
+      // codebase for anything that actually matters, so this extends the
+      // same never-trust-the-model-alone principle to ROW IDENTITY itself.
+      //
+      // Look for reconciled rows sharing the SAME bank and the SAME exact
+      // facility code that the model left as separate rows:
+      //   - Same limit too → unambiguous duplication (the same bank cannot
+      //     plausibly hold two different accounts with the identical short
+      //     code AND the identical limit by coincidence) — auto-merge,
+      //     union covenant/security text the same way loanCovenantOf does,
+      //     flag as an automatic merge for the auditor to confirm.
+      //   - Different limits → genuinely ambiguous (could be one facility
+      //     whose limit changed via supplement, or two separate accounts
+      //     sharing a generic code by coincidence). Do NOT silently pick
+      //     one — flag both rows naming both limits and leave them separate
+      //     so the auditor makes the final call, rather than this tool
+      //     guessing and risking an understated or double-counted position.
+      const sameBankCodeGroups = {}
+      reconciled.forEach(f => {
+        const bank = (f.bankName || '').trim().toLowerCase()
+        const code = (f.facilityName || '').trim().toLowerCase()
+        if (!bank || !code) return
+        const key = `${bank}|${code}`
+        if (!sameBankCodeGroups[key]) sameBankCodeGroups[key] = []
+        sameBankCodeGroups[key].push(f)
+      })
+
+      const codeMergedIds = new Set()
+      const codeMergedRows = []
+
+      Object.values(sameBankCodeGroups).forEach(group => {
+        if (group.length < 2) return
+        const limits = group.map(f => parseFloat(f.approvedLimit) || 0)
+        const allSameLimit = limits.every(l => l === limits[0])
+
+        if (allSameLimit) {
+          const base = group[0]
+          const isBlankText = (t) => !t || !t.trim() || t.trim().toUpperCase() === 'N/A'
+          const unionText = (field) => {
+            const seen = new Set()
+            const distinct = []
+            group.forEach(f => {
+              const trimmed = (f[field] || '').trim()
+              if (isBlankText(trimmed)) return
+              const key = trimmed.toLowerCase()
+              if (seen.has(key)) return
+              seen.add(key)
+              distinct.push(trimmed)
+            })
+            return distinct.length ? distinct.join('\n') : 'N/A'
+          }
+          const unionedSecurity = unionText('securityBlock')
+          const merged = {
+            ...base,
+            id: crypto.randomUUID(),
+            loanCovenant: unionText('loanCovenant'),
+            securityBlock: unionedSecurity === 'N/A' ? base.securityBlock : unionedSecurity,
+            mergedFromIds: [...new Set(group.flatMap(f => f.mergedFromIds || [f.id]))],
+            sourceDocIds: [...new Set(group.flatMap(f => f.sourceDocIds || []))],
+            redFlags: [
+              ...(base.redFlags || []),
+              `Auto-reconciled: reconciliation returned ${group.length} separate rows for ${base.bankName}'s "${base.facilityName}", all at the identical limit of RM${limits[0].toLocaleString('en-MY')} — folded into one row here since the same bank stating the exact same facility code at the exact same limit twice is not plausibly two different accounts. Verify against source if in doubt.`,
+            ],
+          }
+          codeMergedRows.push(merged)
+          group.forEach(f => codeMergedIds.add(f.id))
+        } else {
+          const limitList = group.map(f => `RM${(parseFloat(f.approvedLimit)||0).toLocaleString('en-MY')}${f.facilityDate ? ` (${f.facilityDate})` : ''}`).join(', ')
+          group.forEach(f => {
+            f.redFlags = [
+              ...(f.redFlags || []),
+              `Automated check: ${group.length} rows from ${f.bankName || 'this bank'} share the exact same facility code "${f.facilityName}" but different limits (${limitList}) — this is either ONE facility whose limit changed between documents (in which case these should be a single row at the latest limit) or genuinely separate loan accounts that happen to share a generic code. Kept as separate rows pending auditor confirmation; verify against the source documents' account/reference numbers before relying on this as either a single position or a total.`,
+            ]
+          })
+        }
+      })
+
+      if (codeMergedRows.length > 0) {
+        reconciled = [...reconciled.filter(f => !codeMergedIds.has(f.id)), ...codeMergedRows]
+      }
+
       // Conservation check — the last line of defence, independent of
       // everything above. Confirmed this session: the same reconcile prompt,
       // on the same input, has produced correct pooling, incorrect
