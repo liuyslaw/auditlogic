@@ -515,7 +515,7 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       // the fix, not batching, because those documents genuinely must be
       // reconciled together in a single call.
       function batchKeyOf(doc) {
-        return (doc.bankName || '').trim().toLowerCase()
+        return `${(doc.bankName || '').trim().toLowerCase()}|${(doc.caRefNo || '').trim().toLowerCase()}`
       }
       const batchGroups = new Map()
       extractedDocs.forEach(d => {
