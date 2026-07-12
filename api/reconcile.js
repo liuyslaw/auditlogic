@@ -347,6 +347,10 @@ When the same facility appears across multiple documents and values differ:
 
   Type of Facility:   Original LO → Supplement overrides if renamed → Renewal carries forward
   Approved Limit:     Original LO → Supplement overrides if changed → Renewal overrides if restated
+                      (for amortizing TERM LOANS specifically, a later restated DECREASE
+                      is usually the reducing balance, not a genuine change — see the
+                      MANDATORY CARVE-OUT — AMORTIZING TERM LOANS section below before
+                      applying this row to any term loan)
   Interest Rate:      Original LO → Supplement overrides if changed → RENEWAL ALWAYS OVERRIDES (rate repricing is the primary purpose of renewal)
   Repayment Terms:    Original LO → Supplement overrides if changed → Renewal overrides if restated
   Security:           Original LO → Supplement overrides if changed → Renewal CARRIES FORWARD (security rarely changes at renewal)
@@ -386,12 +390,15 @@ INCREMENTAL LIMIT CHANGES — applies to EVERY facility type, not just trade bun
 ═══════════════════════════════════════════════════════════════
 
 THIS RULE APPLIES UNIVERSALLY — to ordinary Fixed Term Loans, Combined Trade bundles,
-Bankers' Acceptances, every facility type without exception. Confirmed failure mode from
-past runs: this rule was applied correctly to a Combined Trade bundle but skipped for an
-ordinary Fixed Term Loan in the SAME document, same table, same reconcile run. If you
-find yourself thinking "this rule is for trade facility bundles" — that thinking is
-wrong. Apply it to every single row in every Existing/Change/New Limit table you see,
-loan and trade facility alike, with zero exceptions.
+Bankers' Acceptances, every facility type without exception, WHEN THE TABLE REFLECTS A
+GENUINE CHANGE TO THE FACILITY. Confirmed failure mode from past runs: this rule was
+applied correctly to a Combined Trade bundle but skipped for an ordinary Fixed Term Loan
+in the SAME document, same table, same reconcile run. If you find yourself thinking
+"this rule is for trade facility bundles" — that thinking is wrong. Apply it to every
+single row in every Existing/Change/New Limit table you see, loan and trade facility
+alike — EXCEPT for the one narrow, mandatory carve-out below for amortizing term loans,
+which is not optional either. Read that carve-out before applying this section to any
+term loan.
 
 METHOD 1 — PREFERRED: read the bank's own computed "New Limit" column directly.
 
@@ -449,6 +456,74 @@ decision.
   This check happens BEFORE the Independent vs Shared Limits pooling logic below — pool
   identical-limit instruments into one bundle first, THEN check later documents for a
   stated adjustment to that pooled limit, THEN apply the adjustment to get the final figure.
+
+═══════════════════════════════════════════════════════════════
+MANDATORY CARVE-OUT — AMORTIZING TERM LOANS: A DECREASE IS USUALLY THE REDUCING
+BALANCE, NOT A GENUINE LIMIT CHANGE
+═══════════════════════════════════════════════════════════════
+
+Everything above this line is correct for REVOLVING and TRADE facilities (OD, LC, TR,
+BA, DC, MOL, MCTL, IVF, BG, FEC, etc.) — for those, a later "Existing/Change/New Limit"
+table genuinely restates the ceiling the borrower can draw against, and Method 1/Method 2
+above should be applied literally with zero exceptions.
+
+For an ordinary AMORTIZING TERM LOAN (a facility with a fixed tenure and monthly/periodic
+instalment schedule — "Term Loan", "Fixed Term Loan", "TL", a BNM relief/SRF term loan,
+etc. — as opposed to an on-demand or revolving facility), this is DIFFERENT and gets
+misread constantly: Malaysian banks routinely restate a term loan's CURRENT REDUCING
+BALANCE in the exact same "Existing (RM) | Change (RM) | Revised/New Limit (RM)" table
+format used for genuine limit changes elsewhere in the same letter — most commonly at
+renewal, or when the loan is referenced as "Existing Sub-limit" in a later Letter of
+Offer that is really about a DIFFERENT facility. This is NOT the bank reducing what it
+originally sanctioned; it is the bank showing how much of the original principal remains
+outstanding, exactly the way an amortization schedule would, dressed up in the same table
+the reconcile-limit-change rule above expects to read literally.
+
+CONFIRMED REAL CASE (Hong Leong Bank, Elkom): a Letter of Renewal dated 31 January 2023
+states, in the exact "New Limit"-style format: "Fixed Term Loan (Fixed TL):
+RM1,531,858.33 (Original Limit: RM1,950,000.00)" and "Fixed Term Loan – BNM SRF:
+RM647,230.78 (Original Limit: RM1,000,000.00)". The bank itself parenthetically
+preserves the original sanctioned amount specifically because the leading figure is NOT
+a new sanctioned ceiling — it is the current outstanding/reducing balance. CORRECT:
+approvedLimit remains RM1,950,000.00 and RM1,000,000.00 respectively — the ORIGINAL
+figures, carried forward from the facility's first-ever documented sanction, regardless
+of this later letter's restated lower figures. WRONG, an actual regression seen in
+production: reading RM1,531,858.33 / RM647,230.78 as the New Limit per the rule above and
+overwriting the original sanctioned amounts with them.
+
+CONFIRMED REAL CASE (CIMB Bank, Elkom): the Original 2019 Letter of Offer sanctions
+"Term Loan (TL)" at an Existing Sub-limit of RM4,000,000.00 (already shown reduced to
+RM2,104,361.04 in that same letter's own table — the loan was drawn down before this
+letter and was already amortizing) and "Term Loan 2 (TL2)" as a brand-new facility of
+RM2,000,000.00. A 2022 Letter of Offer then restates, in an "Existing (RM) | Increase/
+Decrease (RM) | Revised Limit (RM)" table: TL Existing RM2,104,361.04, Decrease
+RM795,666.24, Revised RM1,308,694.80; TL2 Existing RM2,000,000.00, Decrease RM327,018.53,
+Revised RM1,672,981.47. CORRECT: approvedLimit for TL is RM4,000,000.00 (the facility's
+true original sanction, from the 2019 letter) and for TL2 is RM2,000,000.00 (TL2's own
+original sanction, also from 2019) — both years' "Revised Limit" figures are reducing
+balances, not new sanctioned ceilings, and should NOT overwrite the originals. WRONG: an
+actual regression seen in production, reading the 2022 letter's Revised Limit column
+literally and reporting TL at RM1,308,694.80 and TL2 at RM1,672,981.47.
+
+HOW TO TELL THE DIFFERENCE (apply in this order):
+  1. Is the facility an amortizing term loan (fixed tenure + instalment schedule), not a
+     revolving/on-demand/trade facility? If no, this carve-out does not apply — use
+     Method 1/Method 2 above literally.
+  2. If yes, and a later document shows a DECREASE in that facility's stated limit: treat
+     it as the reducing balance. Keep approvedLimit equal to the EARLIEST documented
+     sanctioned amount for that exact facility (its true original, however many documents
+     back that is — walk the whole chain, not just the immediately preceding letter).
+     Record the later restated balance in changeHistory for transparency (e.g. "Reducing
+     balance restated at RM1,531,858.33 per Renewal Letter 31.1.2023 (original sanction
+     RM1,950,000.00 retained as approvedLimit)"), but do not let it override approvedLimit.
+  3. If a later document shows an INCREASE for a term loan (a genuine top-up), or uses
+     explicit restructuring/permanent-reduction language (e.g. "the Facility is hereby
+     permanently reduced to..." rather than just restating a renewal position), treat that
+     as a real change and apply Method 1/Method 2 above as normal — this carve-out only
+     protects against misreading routine amortization as a cut to the sanctioned facility.
+  4. If the decrease reaches nil/zero, the ordinary Facility Lifecycle settlement rules
+     above still apply (it really is discharged) — this carve-out is only about non-zero
+     reducing balances being mistaken for a smaller sanctioned facility.
 
 ═══════════════════════════════════════════════════════════════
 CONTINGENT / CONDITIONAL LIMIT INCREASES — MANDATORY FLAGGING
@@ -564,6 +639,25 @@ a drifted/renamed one — never output two separate rows for the same bank with 
 same facility code unless the documents explicitly state they are different accounts
 (e.g. different caRefNo that is a clear, unambiguous numeric mismatch, not just an
 absent or differently-formatted reference).
+
+A BUNDLE MEMBER THAT TEMPORARILY DIVERGES IS STILL THE SAME FACILITY — do not let a
+bundled instrument (see INDEPENDENT VS. SHARED LIMITS below, e.g. a "Combined Trade"
+group covering LC/TR/BA/IVF/OFCL-type instruments that normally all share one identical
+limit) get permanently split off into its own standalone row just because ONE interim
+document happens to show it at a different limit than its siblings at that snapshot in
+time. Keep matching that instrument to the same bundle across every later document — if
+a subsequent document restates it back at the same limit as its siblings, that confirms
+it was always the same bundle member and the interim divergence was just a mid-sequence
+snapshot, not a split. CONFIRMED REAL CASE (Hong Leong Bank, Elkom): a January 2023
+renewal letter shows a "Combined Trade" bundle's LC/TR/BA/IVF at RM8,500,000 each but
+lists Onshore Foreign Currency Loan (OFCL) — one of that same bundle's own named
+instruments — at a different interim figure of RM3,000,000. A later December 2024 letter
+restates the whole bundle, OFCL included, back at RM13,500,000 across every instrument.
+CORRECT: OFCL is tracked as part of the SAME Combined Trade bundle throughout and ends up
+in the final merged row at RM13,500,000 like its siblings. WRONG, an actual regression
+seen in production: OFCL left behind as its own standalone row at the stale interim
+RM3,000,000/January-2023 figure, disconnected from the bundle it was always named as
+part of.
 
 ═══════════════════════════════════════════════════════════════
 RECONCILIATION DECISION RULES
@@ -703,6 +797,12 @@ OUTPUT QUALITY STANDARDS — the output is acceptable when:
     rows, two "TL ADF" rows) unless the source documents give explicit, unambiguous evidence
     they are different loan accounts (see NAME-DRIFT-TOLERANT MATCHING and DOCUMENT GROUPING
     worked examples above) — an absent or differently-formatted caRefNo is NOT such evidence
+18. Every amortizing term loan's approvedLimit is its true ORIGINAL sanctioned amount, walked
+    back through the full document chain — not a later renewal/restatement's reducing balance
+    (see MANDATORY CARVE-OUT — AMORTIZING TERM LOANS above). If in doubt whether a later
+    figure is a genuine change or a reducing balance, check whether the document itself
+    parenthetically states an "Original Limit" — if it does, that confirms the leading figure
+    is the reducing balance, not a new sanction
 
 ═══════════════════════════════════════════════════════════════
 OUTPUT LENGTH DISCIPLINE — keep every facility's text fields concise
