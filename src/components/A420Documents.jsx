@@ -354,6 +354,18 @@ export default function A420Documents({ eng, updateDocs, updateFacilities, updat
           // objects — not just facilities — to /api/reconcile.
           caRefNo: result.caRefNo || '',
           supersedesDate: result.supersedesDate || '',
+          // FIX (CIMB/HLB covenants stated at bank-relationship level, not
+          // tied to any one facility, silently lost): some documents state
+          // covenants/conditions (e.g. a CIMB "Renewal of Banking
+          // Facility(ies)" letter with a Minimum DSC and gearing condition)
+          // with NO facility limit table at all — extract.js now surfaces
+          // this via a new top-level bankLevelCovenant field, but same as
+          // caRefNo/supersedesDate above, it needs to be carried onto the
+          // doc record here or it never reaches handleReconcile
+          // (EngagementShell.jsx), which is what actually applies it to
+          // every facility sharing this document's bank via a deterministic
+          // backfill (see bankLevelCovenantsOf in EngagementShell.jsx).
+          bankLevelCovenant: result.bankLevelCovenant || '',
         }
 
         // Update local accumulators — keeps batch-uploaded files intact.
@@ -464,6 +476,7 @@ export default function A420Documents({ eng, updateDocs, updateFacilities, updat
         // Same fix as handleFiles above — carry these through on re-run too.
         caRefNo: result.caRefNo || '',
         supersedesDate: result.supersedesDate || '',
+        bankLevelCovenant: result.bankLevelCovenant || '',
       }
 
       updateDocsAndFacilities(
