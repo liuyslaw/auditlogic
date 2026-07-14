@@ -371,6 +371,74 @@ confirmed limit if no table is present).
 If no such contingency exists for this facility, output:
   "conditionalIncrease": { "present": false, "conditionText": "", "unconditionalPortion": 0 }
 
+FIELD 3C — POOLED / INTERCHANGEABLE SUB-LIMITS (do NOT double-count these)
+
+Malaysian bank facility tables frequently list several named instruments that all
+draw from ONE shared pool rather than each being an independent, additive
+sanction. Two confirmed signals that this is happening:
+  (a) A figure shown in PARENTHESES in the Existing/Change/Revised Limit columns,
+      immediately following or beside an unbracketed "anchor" figure for a
+      related instrument — the parenthesis is the confirmed convention in these
+      documents for "this instrument draws from the same limit as the instrument
+      above/beside it," not a second independent sanction.
+  (b) Explicit pooling language nearby, most commonly: "the Facilities may be
+      utilised interchangeably, provided always that the total amount of the
+      Facilities utilised at any one time shall not exceed RM X" (a Multi Option
+      Line/MOL-style clause), or two instruments named as alternate drawdown
+      MODES of the same underlying line (e.g. a "Facility" and its "Spot"
+      counterpart for FX), or a bundle explicitly labelled with a group name
+      (e.g. "Trade Facilities") with several named sub-lines beneath it.
+
+WHEN THIS HAPPENS: output ONE facility row for the whole pool, not one row per
+named instrument inside it — the exact same treatment this codebase already
+gives "Combined Trade" bundles (e.g. "Combined Trade (BA/DC/TR/MCTL)" as a single
+row, not four separate ones). Build the combined facilityCode the same way: the
+group's own stated name if the document gives one (e.g. "Trade Facilities
+(TRD)", "Foreign Exchange Contracts (FX-Facility / FX-Spot)"), or "Combined
+Trade (CODE1/CODE2/...)" if it doesn't. approvedLimit for the combined row is the
+pool's own ceiling (the unbracketed anchor figure) — NEVER the sum of the
+bracketed figures, since they are the SAME exposure restated, not additional
+exposure.
+
+EXCEPTION — a sub-instrument with its OWN genuinely SMALLER cap: if one
+instrument in the pool is explicitly limited to a lower figure than the pool
+ceiling (its own distinct operating constraint, not just a restatement of the
+same number), extract THAT one as its own separate row at its own smaller
+figure, in addition to the combined pool row for the rest.
+
+CONFIRMED REAL CASE (CIMB Bank, Elkom): a Multi Option Line (MOL) of RM6,000,000
+lists Bank Guarantee (BG), Bankers Acceptance (BA), Documentary Credit (DC), Trust
+Receipt (TR) and Multi Currency Trade Loan (MCTL) all in parentheses beneath it —
+BA, DC, TR and MCTL are each bracketed at the IDENTICAL RM6,000,000 (the same pool
+ceiling restated four times — these do NOT get their own rows, they are fully
+represented by the MOL row itself), but BG is bracketed at a DIFFERENT, smaller
+RM100,000 ("BG shall be operated up to RM100,000.00 only" is stated explicitly
+in the same letter) — BG DOES get its own row, at RM100,000, because that is a
+genuinely narrower sub-cap the auditor needs to see, not a restatement of the
+RM6,000,000 pool.
+
+CONFIRMED REAL CASE, GET THIS RIGHT (United Overseas Bank, Elkom): "Foreign
+Exchange Contracts (FX-Facility)" and "Spot Foreign Exchange Contracts
+(FX-Spot)" are stated as an Existing/Change/Revised Limit pair at the IDENTICAL
+RM28,300,000 (Spot shown in parentheses — the standard forward-vs-spot mirror of
+one FX line, not a second facility). CORRECT: ONE row, "Foreign Exchange
+Contracts (FX-Facility / FX-Spot)", approvedLimit RM28,300,000. WRONG, an actual
+regression seen in production: two separate rows, each at RM28,300,000,
+overstating this one exposure by RM28,300,000.
+
+CONFIRMED REAL CASE, GET THIS RIGHT (Alliance Bank, Elkom): "Trade Facilities
+(TRD)" is stated at RM6,000,000 with Letter of Credit, Trust Receipt and Bankers
+Acceptance sub-lines all bracketed at the identical RM6,000,000, and Shipping
+Guarantee and Bank Guarantee sub-lines bracketed at a smaller RM1,000,000.
+CORRECT: two rows — "Trade Facilities (TRD) — LC/TR/BA Sub-lines" at
+RM6,000,000, and "Trade Facilities (TRD) — SG/BG Sub-lines" at RM1,000,000 (SG
+and BG share their OWN distinct RM1,000,000 sub-pool, smaller than the main
+RM6,000,000 pool, per the EXCEPTION above — so they bundle together at their own
+figure, not with LC/TR/BA, and not as three more separate rows each restating a
+limit). WRONG, an actual regression seen in production: six separate rows (TRD,
+plus LC, TR, BA, SG and BG each again at their pool's full figure) — inflating
+this bank's total by roughly RM19 million for one relationship.
+
 FIELD 4 — interestRateText + interestRateCalc (Col I)
   Two-part format:
   - interestRateText: exactly as stated e.g. "BLR - 2.59%", "BLR + 0.5%", "2.5% plus BNM Funding rate"
