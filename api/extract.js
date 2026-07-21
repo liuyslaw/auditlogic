@@ -1,3 +1,7 @@
+import dotenv from 'dotenv'
+   dotenv.config({ path: '.env.local' })
+
+
 import { Readable } from 'stream'
 
 // Repairs a common LLM JSON-generation defect: a raw, unescaped control
@@ -73,7 +77,9 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set in Vercel environment variables.' })
+console.log('DEBUG apiKey present?', !!apiKey, 'length:', apiKey ? apiKey.length : 0)
+console.log('DEBUG matching env keys:', Object.keys(process.env).filter(k => k.includes('ANTHROPIC') || k.includes('GROQ')))
+if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set in Vercel environment variables.' })
 
   let parts
   try { parts = await parseFormData(req) }
@@ -160,11 +166,52 @@ NEW LO / RESTRUCTURING:
   → Replaces existing loan structure — treat as Original LO
 
 HIRE PURCHASE AGREEMENT:
-  → Single document per asset
-  → Extract as ONE facility
-  → approvedLimit = the pre-interest financed amount (Cash Price minus Deposit) —
-  → NOT any figure that already has term charges/interest added on top.
-  → See STEP 4 below for the two different field-label formats this appears in.
+  → Extract as ONE facility PER CONTRACT/AGREEMENT NUMBER — not one facility per
+    asset, per unit, or per schedule page. Most HP agreements finance a single
+    asset and this distinction never comes up, but some finance SEVERAL assets
+    together under one agreement — check the Contract/Agreement No. before
+    deciding how many facility rows to create.
+  → MULTI-ASSET SCHEDULE — WATCH FOR THIS: if the document contains a Schedule
+    with repeating blocks like "Vehicle/Equipment Description: Asset 1", "Asset
+    2", "Asset 3"... each with its own unit count/description/serial no., but
+    ALL of them printed under the SAME Contract/Agreement No., that is the
+    signature of ONE agreement bundling several items — not several separate
+    facilities. Do NOT create one facility row per Asset block, and do NOT sum
+    or multiply a per-item price across those blocks unless the document
+    actually states a separate price per item (it usually does not — the asset
+    blocks describe WHAT was financed, not HOW MUCH each item cost).
+    → In this case, find the ONE total facility amount stated at the
+    contract level — this is usually printed in a place OTHER than the asset
+    schedule itself: the company's Board Resolution authorising the facility
+    ("...to accept the Hire Purchase facility amount of RM X granted by
+    [financier]"), and/or the stamp duty receipt ("Balasan/Consideration: RM
+    X"). Use that single figure as approvedLimit for the one combined facility
+    row. Do not confuse it with a Guarantee Schedule's "Balance originally
+    payable under the agreement (Amount Financed + Total Interest Charged)" —
+    that figure already has interest added on top (same trap as Format B's
+    item (viii) below) and will be noticeably higher than the correct
+    approvedLimit.
+    → facilityCode = "Hire purchase"; facilitySubName = a combined description
+    naming the bundled assets (e.g. "Dry Sanding Booth c/w Air Exhaust System
+    (4 units) + Sky-lift & Crane"), not just the first asset in the list.
+    CONFIRMED REAL CASE: BMW Credit (Malaysia) HP Agreement No. 7730328
+    (Elkom, dated 01.04.2024) bundles 5 asset blocks — Dry Sanding Booth c/w
+    Air Exhaust System (A), (B), (C) [2 units], (D), plus a Sky-lift & Crane —
+    6 units across 5 descriptions, all under this one contract number. The
+    correct approvedLimit is RM282,240.00, confirmed independently by both the
+    Board Resolution ("Hire Purchase facility amount of RM 282,240.00") and
+    the LHDN stamp duty receipt ("Balasan: RM282,240.00"). The Guarantee
+    Schedule's "Balance originally payable" for the same contract is
+    RM338,688.00 (282,240 + interest) — WRONG, do not use. A confirmed past
+    error was extracting this contract as multiple facility rows (one per
+    asset variant), which inflates the combined reported total for this one
+    agreement well above the true RM282,240 — if you find yourself about to
+    write more than one facility row for a single Contract/Agreement No.,
+    stop and re-check whether this multi-asset pattern applies.
+  → For an ordinary single-asset HP agreement, approvedLimit = the pre-interest
+    financed amount (Cash Price minus Deposit) — NOT any figure that already
+    has term charges/interest added on top.
+  → See STEP 4 below for the different field-label formats this appears in.
 
 REPAYMENT SCHEDULE:
   → Shows instalment history and balance
@@ -439,6 +486,51 @@ limit). WRONG, an actual regression seen in production: six separate rows (TRD,
 plus LC, TR, BA, SG and BG each again at their pool's full figure) — inflating
 this bank's total by roughly RM19 million for one relationship.
 
+FIELD 3D — SECURED/MARGIN AMOUNT vs FACILITY LIMIT (do NOT confuse these)
+
+Forward Exchange Contract (FEC), FX and similar hedging-type facilities are
+routinely secured by a "risk factor" or margin — a SMALLER percentage of the
+actual facility limit, held as security, not the limit itself. Confirmed real
+pattern (Hong Leong Bank, Elkom, FEC): a table row states "Forward Exchange
+Contract (FEC) Facility secured at RM1,000,000.00 (which is up to 10% of the
+FEC limit)" — the RM1,000,000 figure here is the SECURITY/MARGIN amount, not
+the limit. The same document, in its own facility-by-facility detail section,
+separately and explicitly states "(IX) Forward Exchange Contract ('FEC') ...
+Limit: RM10,000,000.00 which is to be secured by 10% risk factor" — confirming
+the true approvedLimit is RM10,000,000, ten times the margin figure. WRONG, an
+actual regression seen in production: extracting RM1,000,000 as approvedLimit
+(the margin, mistaken for the limit) — understating this facility by 90%.
+RULE: whenever a facility is described as "secured at/up to X% risk factor" or
+similar margin/security wording, that percentage figure is NEVER the
+approvedLimit. Find and use the explicit "Limit: RM..." statement for that
+same facility elsewhere in the document (commonly in a later facility-by-
+facility detail section even when the summary table only shows the secured
+amount). If truly no explicit Limit figure is stated anywhere in the document
+for that facility, and only a secured amount is given, back-calculate the
+limit from the stated percentage (secured amount ÷ risk factor %) rather than
+using the secured amount directly, and note the derivation in purposes.
+
+FIELD 3E — RENEWAL/REVIEW LETTERS RESTATING MULTIPLE EXISTING FACILITIES
+
+A Renewal Letter or periodic review letter (see STEP 1) very often restates
+SEVERAL existing facilities together in one table — e.g. two Fixed Term Loans,
+an Overdraft, and a Combined Trade group all in the same letter, each with its
+own current balance/limit. When this happens, match each restated figure to
+its facility type EXACTLY as labelled in THIS document — never relabel, merge,
+or reassign a restated figure to a different facility type than the one
+printed beside it, even if two facilities in the same letter happen to share a
+similar or identical amount. Output exactly one row per facility type actually
+present in the letter's table — do not manufacture an additional row for a
+facility type that is not separately labelled in the document. Confirmed real
+case (Hong Leong Bank, Elkom, review letter dated 4.1.2022): the letter
+restates "Fixed Term Loan (Fixed TL) – SRF", "Fixed Term Loan (Fixed TL)" and
+"Overdraft (OD)" as three separate, clearly-labelled lines (RM843,018.97,
+RM1,686,137.52 and RM1,500,000.00 respectively) — there is no second/new Fixed
+Term Loan anywhere in this letter. WRONG, an actual regression seen in
+production: outputting the Overdraft's RM1,500,000 figure as a second, distinct
+"Fixed Term Loan" facility — this fabricates a facility that does not exist in
+the source document at all.
+
 FIELD 4 — interestRateText + interestRateCalc (Col I)
   Two-part format:
   - interestRateText: exactly as stated e.g. "BLR - 2.59%", "BLR + 0.5%", "2.5% plus BNM Funding rate"
@@ -610,6 +702,50 @@ and others use this exact layout):
     Vehicle Registration Fees plus (v) RM4,374.17 Insurance — both financed into
     the loan and both missing from (iii).
 
+  TRAP VARIANT — a handwritten correction/annotation on item (i) or (iii) does
+  NOT change which row you extract. Some Public Bank-issued HP agreements carry
+  a handwritten correction to the Cash Price and/or a large, circled/arrowed
+  figure next to item (iii) — visually the most prominent number on the page,
+  easy to mistake for "the auditor's marked final answer." It is still only
+  item (iii), corrected or not. The field to extract is always item (vi), by
+  its printed row label — check whether (vi) itself has also been crossed out
+  or corrected; if it has not, use its printed value as-is even when (i)/(iii)
+  show handwritten corrections elsewhere. Corrections to the component figures
+  routinely net to the same (vi) total (a reallocation between Cash Price,
+  Registration Fees and Insurance, not a change to the amount financed).
+
+  CONFIRMED WORKED EXAMPLE — real document, get this one right: HINO XZC710R,
+  Public Bank (D539, Reg. No. BRR9176). Printed: (i) Cash Price RM146,983.04,
+  (ii) Deposit RM23,400.00, (iii) Cash Price less Deposit RM123,583.04, (iv)
+  Freight RM0.00, (v) Registration RM60.00, (v) Insurance RM5,356.96, (vi)
+  Total RM129,000.00. Handwritten corrections: (i)→RM147,383.10, (iii)→
+  RM123,983.10 (large, arrowed — the most visually prominent figure on the
+  page), Registration→RM110.00, Insurance→RM4,906.90. (vi) itself carries NO
+  correction and remains printed at RM129,000.00 — confirmed correct both by
+  the document's own arithmetic (123,983.10 + 110.00 + 4,906.90 = 129,000.00,
+  matching 123,583.04 + 60.00 + 5,356.96 = 129,000.00 under the original
+  figures — the corrections net to zero change in the total) and against the
+  Reference, which carries this facility at RM129,000. CORRECT approvedLimit =
+  129,000. Extracting 123,983 (the annotated item (iii)) — WRONG, the exact
+  same (iii)-instead-of-(vi) trap, made easier to fall into here because the
+  annotation draws the eye to (iii) specifically.
+
+  SECOND CONFIRMED WORKED EXAMPLE — no annotation involved at all, so do not
+  treat the HINO case above as only happening when a document has handwritten
+  corrections. Perodua Alza, Public Bank (D544, Reg. No. VMG9176) — a
+  completely clean, unmarked printed form (only a review tick/arrow next to
+  item (i), no figures altered): (i) Cash Price RM62,350.00, (ii) Deposit
+  RM6,782.80, (iii) Cash Price less Deposit RM55,567.20, (iv) Registration
+  RM500.00, (v) Insurance RM1,932.80, (vi) Total RM58,000.00 (55,567.20 +
+  500.00 + 1,932.80 = 58,000.00 exactly). Reference confirms RM58,000.
+  CORRECT approvedLimit = 58,000. Extracting 55,567 — WRONG, and this exact
+  document has produced this exact error from this exact prompt more than
+  once, including after the HINO example above was added. Treat this as
+  confirmation that a prose warning is not enough on its own — run the
+  MANDATORY SELF-CHECK in STEP 5 below on every single Format B Hire Purchase
+  facility before finalizing output, no exceptions, even when nothing about
+  the document looks unusual.
+
 FORMAT C — equipment/machinery HP agreements with a DIFFERENT structure, confirmed
 on a PAC Lease press machine agreement. DO NOT apply Format A/B's rule here — for
 THIS format the correct field is the one that has finance charges ALREADY ADDED,
@@ -645,11 +781,110 @@ HP document just because it also involves a cash price and a deposit.
     That is not the answer either; it is a preliminary approval ceiling, not the
     final Schedule's computed price. Use the Schedule's own BALANCE PAYABLE.
 
-Sanity check for Format A/B specifically: approvedLimit should equal Cash Price
-minus Deposit (plus any financed accessories/insurance/fees included in the same
-pre-interest total) — NOT that figure plus term charges/interest. This check does
-NOT apply to Format C, where the correct field is the one WITH term charges
-included — see Format C above before assuming this sanity check applies.
+FORMAT D — MULTI-ASSET AGREEMENT (one Contract/Agreement No., several assets
+bundled together, e.g. BMW Credit-issued equipment HP agreements). This format
+has NO per-item "TABLE OF HIRE PURCHASE PRICE" at all for each asset — instead
+the document has an Asset Schedule (repeating "Vehicle/Equipment Description:
+Asset 1 / Asset 2 / Asset 3..." blocks, all sharing one Contract No.) and the
+single combined facility amount is stated elsewhere in the document package —
+typically in the Hirer's Board Resolution ("...Hire Purchase facility amount of
+RM X granted by [financier]") and/or the LHDN stamp duty receipt
+("Balasan/Consideration: RM X"). USE THAT single figure as approvedLimit for
+ONE facility row covering all assets in the schedule. Do NOT treat each Asset
+block as its own facility, and do NOT use a Guarantee Schedule's "Balance
+originally payable under the agreement (Amount Financed + Total Interest
+Charged)" figure — that is the post-interest total, the same trap as Format
+B's item (viii). See the CONFIRMED REAL CASE (BMW Credit Agreement No.
+7730328, RM282,240.00) under STEP 1's HIRE PURCHASE AGREEMENT section above.
+
+CORRECTION, confirmed 20 Jul 2026: some BMW Credit (and possibly other
+equipment financier) documents DO carry a per-asset payment table after all —
+"Format D has NO per-item table" above does not hold universally. Check every
+document for a "Part B — Period of Hire and Particulars of Payments" block
+(numbered items 1-7) before falling back to the Board Resolution/LHDN route.
+When present, THIS is the correct source, per-asset, and should be preferred
+over Board Resolution/LHDN:
+
+  1(a) Period of Hire / (b) Hiring Commencement Date
+  2.   Cash Price of Goods
+  3.   Accessories
+  4.   Term Charges: (a) rate per annum (b) total amount of terms charges
+  5.   Total Hire Purchase Price [= item 2 + item 4(b) — POST-interest]
+  6.   Deposit, with its own printed "Balance Payable" sub-line directly
+       beneath it              ← DO NOT USE "Balance Payable" — despite the
+                                   reassuring name, it is computed as item 5
+                                   MINUS item 6, i.e. Total Hire Purchase
+                                   Price (already including term charges)
+                                   minus Deposit. This is the exact same
+                                   post-interest trap as Format B's item
+                                   (viii), just under a label that sounds
+                                   like the pre-interest figure you want.
+  7.   Balance of Hire Purchase Price, payable by N monthly hire rentals of
+       RM X — restates item 6's "Balance Payable," same trap, same reason
+       not to use it.
+
+  USE INSTEAD: item 2 (Cash Price of Goods) MINUS item 6 (Deposit), computed
+  yourself — this format has no registration/insurance line items to add
+  back (unlike Format B), so it is a plain subtraction, nothing more.
+
+  CONFIRMED WORKED EXAMPLES — real documents, get these right:
+    Asset "Sky-lift & Crane" (Business Use, qty 1): item 2 Cash Price
+    RM357,700.00, item 6 Deposit RM75,460.00, printed "Balance Payable"
+    RM338,688.00 — WRONG, this is item 5 (RM414,148.00 Total Hire Purchase
+    Price) minus item 6, post-interest. CORRECT approvedLimit = 357,700.00 −
+    75,460.00 = 282,240.00 — confirmed by Nexis, and matches the CONFIRMED
+    REAL CASE (BMW Credit Agreement No. 7730328) cited above exactly, meaning
+    this Part B table is very likely the true per-asset source underlying
+    that same agreement.
+    Second asset, same batch: item 2 Cash Price RM125,000.00, item 6 Deposit
+    RM0.00, printed "Balance Payable" RM150,000.00 — WRONG, same post-interest
+    trap (item 5 Total Hire Purchase Price RM150,000.00 minus zero deposit
+    happens to equal item 5 itself here, which is why it looks deceptively
+    "clean"). CORRECT approvedLimit = 125,000.00 − 0.00 = 125,000.00 —
+    confirmed by Nexis. Do not assume a zero deposit means "Balance Payable"
+    is safe to use — it never is for this field, zero deposit or not.
+
+MANDATORY SELF-CHECK — run this on EVERY Format B Hire Purchase facility, AND
+on every per-asset Format D "Part B" table above, before writing approvedLimit
+into the output, no exceptions, even when the document looks perfectly clean
+and unmarked. This check has been added because the same underlying trap —
+using a plausible-looking post-interest or partial figure instead of the true
+pre-interest financed amount — has been confirmed to recur even after being
+explicitly documented with worked examples (Mazda CX5, HINO XZC710R, Perodua
+Alza, and now the Sky-lift & Crane / second-asset Part B pair above — all
+real, all previously extracted wrong despite the rule already being written
+out) — a prose warning alone is not reliable enough, so treat this as a hard
+arithmetic gate, not a suggestion. For Format B specifically:
+
+  1. Find the document's printed item (iv) Vehicle Registration Fees and item
+     (v) Insurance figures (or their equivalent-numbered fields for that
+     document's exact layout).
+  2. If BOTH are zero or genuinely absent (rare — most real HP agreements
+     finance registration and insurance into the loan), item (iii) and item
+     (vi) will be equal and either is fine.
+  3. If EITHER (iv) or (v) is non-zero, item (vi) MUST be strictly greater
+     than item (iii) by exactly (iv)+(v). Compute (iii)+(iv)+(v) yourself and
+     confirm it equals the printed (vi) figure.
+  4. The number you write into approvedLimit must be item (vi)'s own printed
+     total — never item (iii), even if item (iii) is what your arithmetic in
+     step 3 landed on. If you catch yourself about to output a number that
+     exactly equals (iii) alone on a document where (iv) or (v) is non-zero,
+     that is this exact trap — stop and re-read item (vi)'s own printed row.
+
+For Format D's per-asset "Part B" table specifically:
+
+  1. Locate item 2 (Cash Price of Goods) and item 6 (Deposit) by their own
+     printed row labels.
+  2. Compute item 2 minus item 6 yourself.
+  3. The number you write into approvedLimit must equal that computation —
+     never item 6's own printed "Balance Payable" sub-line, and never item 5
+     or item 7, all three of which already have term charges added in. If
+     you catch yourself about to output a number that matches the printed
+     "Balance Payable" figure rather than your own item2-minus-item6
+     computation, that is this exact trap — stop and recompute.
+
+This check does NOT apply to Format C, where the correct field is the one WITH
+term charges included — see Format C above before assuming this check applies.
 
 Flat rate derivation if not stated: Finance Charges ÷ (Net Finance Amount × Tenure in years) × 100
 
@@ -832,6 +1067,122 @@ Field rules:
       extracted._duplicatesRemoved = duplicatesRemoved
     }
 
+    // Deterministic AUTO-MERGE for the CIMB "Multi Option Line (MOL)" pool —
+    // WIDENED 20 Jul 2026. Started as a narrow MOL-vs-"Combined Trade" merge
+    // (CIMB Bank D401, 13.05.2019, the same document FIELD 3C's worked
+    // example cites: MOL RM6,000,000 with BA/DC/TR/MCTL bracketed at the
+    // same figure, BG separately at RM100,000) after a fresh re-extraction
+    // showed "Multi Option Line (MOL)" and "Combined Trade (BA/DC/TR/MCTL)"
+    // as two separate RM6,000,000 rows. That narrow fix stopped THAT
+    // collision, but a later reconcile export (20 Jul 2026) showed the same
+    // pool fragmented a different way within the data flowing through this
+    // pipeline: bare individual sub-instrument rows — "Bankers Acceptance
+    // (BA)", "Documentary Credit (DC)", "Trust Receipt (TR)", "Multi
+    // Currency Trade Loan (MCTL)" — each restating the identical RM6,000,000
+    // MOL limit, with no "Combined Trade" label at all. Prompt text (FIELD
+    // 3C) names this exact pattern and still isn't reliably followed after
+    // repeated failures, so the deterministic net widens again: if one
+    // facility is named as a Multi Option Line and another IN THIS SAME
+    // DOCUMENT'S EXTRACTION shares the IDENTICAL limit and is named as one
+    // of the MOL's own known sub-instruments (Bankers Acceptance,
+    // Documentary Credit, Trust Receipt, Multi Currency Trade Loan, or a
+    // "Combined Trade" bundle), it is the same pool restated — drop it and
+    // keep only the MOL row. Still intentionally scoped to an identical
+    // limit match so it cannot misfire on an unrelated coincidental match —
+    // every other pooling pattern (Alliance TRD, UOB FX, etc) still only
+    // gets a warning from the general check below, not an automatic merge.
+    const molIdx = dedupedFacs.findIndex(f =>
+      /\bmol\b|multi[\s-]?option[\s-]?line/i.test(f.facilityCode || f.facilityName || '')
+    )
+    if (molIdx !== -1) {
+      const mol = dedupedFacs[molIdx]
+      const molLimit = parseFloat(mol.approvedLimit)
+      const subInstrumentPattern = /combined trade|bankers?\s*acceptance|documentary credit|trust receipt|multi\s*currency\s*trade\s*loan/i
+      const zeroedNames = []
+      for (let i = dedupedFacs.length - 1; i >= 0; i--) {
+        if (i === molIdx) continue
+        const f = dedupedFacs[i]
+        const sameLimit = parseFloat(f.approvedLimit) === molLimit
+        const isSubInstrument = subInstrumentPattern.test(f.facilityCode || f.facilityName || '')
+        if (sameLimit && isSubInstrument) {
+          // Per Lawrence/Nexis confirmation (20 Jul 2026): keep the sub-
+          // instrument row visible in the working paper for completeness —
+          // do NOT delete it — but zero its limit and mark it with a
+          // "Reconcile**" remark, since the real pooled exposure is already
+          // carried once on the MOL/Combined Trade row above. Previously this
+          // spliced the row out entirely, which required a separate
+          // mergedFromIds lineage-transfer fix elsewhere to stop
+          // EngagementShell.jsx's conservation check silently restoring it;
+          // keeping the row (at RM0) sidesteps that whole problem, since
+          // nothing is being removed anymore.
+          zeroedNames.push(f.facilityCode || f.facilityName)
+          const poolName = mol.facilityCode || mol.facilityName
+          f.approvedLimit = 0
+          f.purposes = `Reconcile** — drawn under the shared "${poolName}" pool (RM${molLimit.toLocaleString()}); limit shown at RM0 here to avoid double-counting. See "${poolName}" row for the pooled limit.${f.purposes ? ' Original purpose: ' + f.purposes : ''}`
+        }
+      }
+      if (zeroedNames.length > 0) {
+        extracted._molCombinedTradeMerge =
+          `${zeroedNames.length} row${zeroedNames.length===1?'':'s'} (${zeroedNames.join(', ')}) shown at RM0 with a Reconcile** remark — same Multi Option Line pool as "${mol.facilityCode || mol.facilityName}" at RM${molLimit.toLocaleString()}, restated under different names (see FIELD 3C). Only the MOL row carries the real limit.`
+      }
+    }
+
+    // Deterministic safety net for the FIELD 3C/3D pooled-sub-limit rule above.
+    // That rule is prompt-based (the model must recognise pooling language and
+    // collapse sub-instruments into one row) and has proven unreliable in
+    // practice — confirmed regressions on documents the prompt already gives
+    // worked examples for (CIMB MOL, Alliance TRD), where the model correctly
+    // pooled on one extraction run and fragmented into duplicate-limit rows on
+    // a later run of the SAME document. Prompt text alone cannot be trusted to
+    // catch this every time, so this flags it deterministically instead of
+    // silently accepting the model's output. This does NOT alter or merge any
+    // facility — a genuine coincidental match (two unrelated facilities that
+    // happen to share a limit) is possible, so a human needs to look, not have
+    // the row silently removed. Different facility names, identical
+    // approvedLimit, same bank, same extraction response = likely double-count.
+    const byLimit = new Map()
+    for (const f of dedupedFacs) {
+      const limit = parseFloat(f.approvedLimit)
+      if (!limit) continue
+      const key = limit
+      if (!byLimit.has(key)) byLimit.set(key, [])
+      byLimit.get(key).push(f.facilityCode || f.facilityName || 'Unnamed facility')
+    }
+    const possiblePoolingWarnings = []
+    for (const [limit, names] of byLimit.entries()) {
+      const uniqueNames = [...new Set(names)]
+      if (uniqueNames.length > 1) {
+        possiblePoolingWarnings.push(
+          `Possible pooled-sub-limit double-count: ${uniqueNames.length} differently-named facilities all extracted at the identical limit RM${limit.toLocaleString()} (${uniqueNames.join(', ')}). If these are interchangeable sub-limits of one pool (see FIELD 3C), only ONE row should represent this exposure — check before relying on this export.`
+        )
+      }
+    }
+
+    // Deterministic safety net for the STEP 1 "multi-asset HP agreement" rule
+    // above (Contract/Agreement No. bundling several assets into ONE facility).
+    // That rule is also prompt-based, and the pooled-sub-limit rule right above
+    // has already shown that prompt text alone — even with a worked, confirmed
+    // real-case example — does not reliably stop the model from fragmenting one
+    // thing into several rows. extract.js processes one HP document at a time
+    // (see STEP 1), so more than one "Hire purchase" facility coming out of a
+    // SINGLE document's extraction is itself suspicious and usually means either
+    // a genuine multi-asset agreement got split (the confirmed BMW Credit
+    // 7730328 failure mode), or the same asset was described more than once.
+    // As with the pooling check, this only flags — it does not merge or alter
+    // any row, since a document could legitimately reference more than one
+    // separate HP agreement and a human should confirm either way.
+    const hpFacs = dedupedFacs.filter(f =>
+      /hire[\s_-]?purchase/i.test(f.facilityCode || f.facilityName || '')
+    )
+    const possibleHpSplitWarnings = []
+    if (hpFacs.length > 1) {
+      const names = hpFacs.map(f => f.facilitySubName || f.facilityCode || f.facilityName || 'Unnamed asset')
+      const total = hpFacs.reduce((sum, f) => sum + (parseFloat(f.approvedLimit) || 0), 0)
+      possibleHpSplitWarnings.push(
+        `Possible multi-asset HP agreement split into ${hpFacs.length} rows within this single document (${names.join(', ')}), combined total RM${total.toLocaleString()}. If these assets are all financed under ONE Contract/Agreement No., only ONE row should represent this facility, at the single total stated in the Board Resolution or stamp duty receipt — not a sum of these rows. Check the Contract No. on each asset before relying on this export.`
+      )
+    }
+
     // Confidence scoring based on extraction completeness
     const facs = extracted.facilities || []
     let score = 70
@@ -842,6 +1193,13 @@ Field rules:
     if (facs.every(f => f.facilityDate))         score += 4
     if (facs.every(f => f.facilityCode))         score += 4
     score = Math.min(98, score)
+
+    if (possiblePoolingWarnings.length > 0) {
+      extracted._poolingWarnings = possiblePoolingWarnings
+    }
+    if (possibleHpSplitWarnings.length > 0) {
+      extracted._hpSplitWarnings = possibleHpSplitWarnings
+    }
 
     return { extracted, score, model }
   }
@@ -883,13 +1241,24 @@ Field rules:
     const { extracted, score } = result
     const level = score >= 80 ? 'high' : score >= 60 ? 'medium' : 'low'
     const color = level==='high'?'#22c55e':level==='medium'?'#f59e0b':'#ef4444'
+    const warnings = []
+    if (extracted._duplicatesRemoved > 0) {
+      warnings.push(`${extracted._duplicatesRemoved} duplicate facilit${extracted._duplicatesRemoved===1?'y':'ies'} detected and removed from this document's own extraction — the model described the same facility more than once within this single response.`)
+    }
+    if (extracted._poolingWarnings?.length > 0) {
+      warnings.push(...extracted._poolingWarnings)
+    }
+    if (extracted._hpSplitWarnings?.length > 0) {
+      warnings.push(...extracted._hpSplitWarnings)
+    }
+    if (extracted._molCombinedTradeMerge) {
+      warnings.push(extracted._molCombinedTradeMerge)
+    }
     extracted.confidence = {
       score, level, color,
       label: level[0].toUpperCase()+level.slice(1),
       reasons: [`AI extraction (${usedTier}) · ${fileSizeMB}MB`],
-      warnings: extracted._duplicatesRemoved > 0
-        ? [`${extracted._duplicatesRemoved} duplicate facilit${extracted._duplicatesRemoved===1?'y':'ies'} detected and removed from this document's own extraction — the model described the same facility more than once within this single response.`]
-        : [],
+      warnings,
     }
     extracted.fileName = fileName
     extracted.modelUsed = usedTier
