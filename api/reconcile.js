@@ -1,3 +1,7 @@
+import dotenv from 'dotenv'
+   dotenv.config({ path: '.env.local' })
+
+
 // api/reconcile.js — multi-document reconciliation
 // Skills applied: Dependency Logic, Field Priority Table, Red Flags, Output Quality Standards
 
@@ -1081,6 +1085,96 @@ Return ONLY the JSON object described in the OUTPUT FORMAT section above — no 
       } else {
         console.error('[reconcile] No JSON braces found. stop_reason=', data.stop_reason, 'raw_length=', raw.length)
         return res.status(500).json({ error: 'No JSON found in reconciliation response', raw: raw.slice(0,500) })
+      }
+    }
+
+    // Deterministic AUTO-MERGE for the CIMB "Multi Option Line (MOL)" pool —
+    // WIDENED 20 Jul 2026. History: this started as a narrow MOL-vs-
+    // "Combined Trade" merge (same fix already applied in extract.js's
+    // callClaude()), added because a fresh re-extraction of D401 was clean
+    // at the extract stage but RECONCILE — a SEPARATE Claude call with its
+    // own prompt-based "Independent vs Shared Limits" pooling logic (see
+    // INDEPENDENT VS. SHARED LIMITS above) that doesn't carry extract.js's
+    // specific CIMB worked example — re-split it into a "Combined Trade"
+    // duplicate row. That narrow fix (MOL name vs "combined trade" name)
+    // stopped that specific collision, but the very next reconcile (File 7
+    // export, 20 Jul 2026) showed the SAME pool fragmented a different way:
+    // not bundled under any "Combined Trade" label at all, but as FOUR
+    // separate bare sub-instrument rows — "Bankers Acceptance (BA)",
+    // "Documentary Credit (DC)", "Trust Receipt (TR)", "Multi Currency
+    // Trade Loan (MCTL)" — each at the identical RM6,000,000 MOL limit,
+    // duplicated across two facility dates (13.05.2019 and 31.10.2022),
+    // an 8-row / ~RM48,000,000 overstatement of one RM6,000,000 pool.
+    // Prompt text (FIELD 3C) names this exact CIMB pattern and still isn't
+    // reliably followed after three confirmed failures, so the deterministic
+    // net widens again: for every facility at the SAME BANK as an identified
+    // MOL row, sharing the IDENTICAL approvedLimit, whose name matches one
+    // of the MOL's own known sub-instruments (Bankers Acceptance,
+    // Documentary Credit, Trust Receipt, Multi Currency Trade Loan, or a
+    // "Combined Trade" bundle), drop it — no matter how many times or under
+    // what date it's repeated — and keep only the MOL row. Deliberately
+    // still scoped to (a) same bank as the MOL anchor and (b) identical
+    // limit, so it cannot misfire on an unrelated bank's genuinely
+    // independent BA/TR/DC facility (e.g. UOB's own Bankers Acceptance,
+    // which sits at a different limit and a different bank entirely).
+    // BUG FOUND AND FIXED 20 Jul 2026: this merge was silently splicing
+    // duplicate rows out of `result.reconciledFacilities` without recording
+    // that their original raw facility IDs had been absorbed into the kept
+    // MOL row's mergedFromIds. EngagementShell.jsx runs an independent
+    // conservation check (its own safety net, unrelated to this one) that
+    // compares every facility ID originally SENT to reconcile against every
+    // ID referenced in the response's mergedFromIds — anything sent but not
+    // referenced anywhere is treated as an accidental drop and RESTORED
+    // automatically. Since this merge removed rows without transferring
+    // their mergedFromIds onto the MOL row, their original raw IDs vanished
+    // from the response entirely, the conservation check correctly (from
+    // its own point of view) flagged them as dropped, and re-inserted the
+    // exact raw duplicate rows straight back in — completely undoing this
+    // fix on every single reconcile run without any error or visible sign
+    // that anything had gone wrong. Confirmed via a real Elkom export (File
+    // 8, 20 Jul 2026): CIMB still showed all 8 duplicate BA/DC/TR/MCTL rows
+    // after reconciling, byte-identical to before this merge existed. Fix:
+    // union each removed row's mergedFromIds (and sourceDocIds) onto the
+    // kept MOL row before removing it, so the conservation check sees every
+    // original raw ID as accounted for and has nothing left to restore.
+    // UPDATED 20 Jul 2026 per Lawrence/Nexis confirmation: Nexis confirmed
+    // showing only the pooled amount on the MOL/Combined Trade row is
+    // correct, but wants the sub-instrument rows (BA/DC/TR/MCTL etc) kept
+    // VISIBLE in the working paper — not removed — at RM0 limit with a
+    // "Reconcile**" remark cross-referencing the pooled row. This replaces
+    // the previous splice-and-transfer-lineage approach: since rows are no
+    // longer being removed from the array, the mergedFromIds/sourceDocIds
+    // lineage transfer that used to be needed to satisfy
+    // EngagementShell.jsx's conservation check is no longer necessary either
+    // — each row keeps its own IDs because it's still present.
+    if (Array.isArray(result?.reconciledFacilities)) {
+      const facs = result.reconciledFacilities
+      const molIdx = facs.findIndex(f =>
+        /\bmol\b|multi[\s-]?option[\s-]?line/i.test(f.facilityCode || f.facilityName || '')
+      )
+      if (molIdx !== -1) {
+        const mol = facs[molIdx]
+        const molLimit = parseFloat(mol.approvedLimit)
+        const molBank = (mol.bankName || '').trim().toLowerCase()
+        const subInstrumentPattern = /combined trade|bankers?\s*acceptance|documentary credit|trust receipt|multi\s*currency\s*trade\s*loan/i
+        const zeroedNames = []
+        for (let i = facs.length - 1; i >= 0; i--) {
+          if (i === molIdx) continue
+          const f = facs[i]
+          const sameBank = (f.bankName || '').trim().toLowerCase() === molBank
+          const sameLimit = parseFloat(f.approvedLimit) === molLimit
+          const isSubInstrument = subInstrumentPattern.test(f.facilityCode || f.facilityName || '')
+          if (sameBank && sameLimit && isSubInstrument) {
+            zeroedNames.push(f.facilityCode || f.facilityName)
+            const poolName = mol.facilityCode || mol.facilityName
+            f.approvedLimit = 0
+            f.purposes = `Reconcile** — drawn under the shared "${poolName}" pool (RM${molLimit.toLocaleString()}); limit shown at RM0 here to avoid double-counting. See "${poolName}" row for the pooled limit.${f.purposes ? ' Original purpose: ' + f.purposes : ''}`
+          }
+        }
+        if (zeroedNames.length > 0) {
+          result._molCombinedTradeMerge =
+            `${zeroedNames.length} reconciled row${zeroedNames.length===1?'':'s'} (${zeroedNames.join(', ')}) shown at RM0 with a Reconcile** remark — same Multi Option Line pool as "${mol.facilityCode || mol.facilityName}" at RM${molLimit.toLocaleString()}, restated under different names/dates. Only the MOL row carries the real limit.`
+        }
       }
     }
 
