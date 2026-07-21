@@ -1038,7 +1038,17 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
       for (const f of deduped) {
         const limitIsZero = f.approvedLimit === '' || f.approvedLimit === null || f.approvedLimit === undefined ||
           isNaN(parseFloat(f.approvedLimit)) || parseFloat(f.approvedLimit) === 0
-        if (limitIsZero || f.isSettled === true) {
+        // EXCEPTION added 20 Jul 2026 per Lawrence/Nexis confirmation: a
+        // facility deliberately zeroed by the MOL/Combined Trade pool merge
+        // (see extract.js/reconcile.js) is marked with a "Reconcile**"
+        // remark in its purposes field — it must stay VISIBLE in the working
+        // paper at RM0, not be swept up by this backstop, which exists for
+        // genuinely zero/settled facilities the Reference wouldn't show at
+        // all. Without this exception the pool merge's whole point (showing
+        // the poolable instrument names at RM0 with a cross-reference) would
+        // be silently undone right here.
+        const isPooledZeroRemark = (f.purposes || '').startsWith('Reconcile**')
+        if ((limitIsZero && !isPooledZeroRemark) || f.isSettled === true) {
           excludedZeroOrSettled.push(f)
         } else {
           finalFacs.push(f)
@@ -1204,7 +1214,12 @@ export default function EngagementShell({ eng, updateEngagement, apiKey }) {
                     }}>
                       {isDone ? '✓' : isLive ? '●' : ''}
                     </div>
-                    <span style={{ flex: 1 }}>{s.code} · {s.label}</span>
+                    {/* DEMO-ONLY cosmetic tweak, guarded by eng.isDemo — never
+                        affects real engagements. TEMPORARY: added 20 Jul 2026
+                        for a one-off marketing screenshot, remove this whole
+                        conditional (revert to `{s.code} · {s.label}`) once
+                        that's done — see project chat for context. */}
+                    <span style={{ flex: 1 }}>{eng?.isDemo ? s.label : `${s.code} · ${s.label}`}</span>
                     {!isPhase1 && <Lock size={9} style={{ opacity: 0.4 }} />}
                     {isLive && <span className="badge badge-live" style={{ fontSize: 9, padding: '1px 5px' }}>Live</span>}
                     {isDone && <ChevronRight size={10} style={{ opacity: 0.4 }} />}
